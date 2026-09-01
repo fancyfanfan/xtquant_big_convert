@@ -573,6 +573,7 @@ class BigQmtRpcHandlers:
         # succeeded (issue #43).
         self._last_server_error = ""
         self._pending_settlement = None
+        self._current_params = params
         if not requested_method:
             raise ValueError("method is required")
         if method not in self.allowed_methods:
@@ -1239,8 +1240,19 @@ class BigQmtRpcHandlers:
         return _normalize_detail_rows(data)
 
     def _configured_account_type(self):
+        gateway = self.order_gateway
+        # When the gateway supports per-request account_type resolution,
+        # use the map-aware type for the current request's account_id.
+        if gateway is not None and hasattr(gateway, "_resolve_account_type"):
+            try:
+                account_id = self._request_account_id(
+                    getattr(self, "_current_params", None) or {})
+                if account_id:
+                    return str(gateway._resolve_account_type(account_id)).strip().upper()
+            except Exception:
+                pass
         return str(
-            getattr(self.order_gateway, "account_type", "CREDIT") or "CREDIT"
+            getattr(gateway, "account_type", "CREDIT") or "CREDIT"
         ).strip().upper()
 
     def _query_trade_detail(self, params, detail_type, strategy_name=""):
@@ -1254,8 +1266,11 @@ class BigQmtRpcHandlers:
         gateway = self.order_gateway
         if gateway is None or gateway.get_trade_detail_data is None:
             return []
+        account_type = (gateway._resolve_account_type(account_id)
+                        if hasattr(gateway, "_resolve_account_type")
+                        else getattr(gateway, "account_type", "STOCK"))
         try:
-            rows = gateway.get_trade_detail_data(account_id, gateway.account_type, detail_type, strategy_name)
+            rows = gateway.get_trade_detail_data(account_id, account_type, detail_type, strategy_name)
             return _normalize_detail_rows(rows)
         except Exception:
             return []

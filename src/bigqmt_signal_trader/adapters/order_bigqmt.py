@@ -36,6 +36,7 @@ except ImportError:
     # 完整 QMT 的模型运行时会注入 passorder 等 API，但部分券商终端不提供可 import 的 xtquant package。
     _xtconstant = _QmtFallbackXtConstant()
 
+from ..account_type_map import account_type_for
 from ..code_utils import normalize_stock_code
 from ..exec_events import date_time_seconds
 from ..models import CancelResult, OrderSnapshot, OrderSubmitResult, SignalAction, TradeSnapshot
@@ -399,6 +400,16 @@ class BigQmtOrderGateway:
         self.price_type = price_type
         self.quick_trade = quick_trade
 
+    def _resolve_account_type(self, account_id):
+        """Per-request account_type: map lookup if configured, else default.
+
+        When BIGQMT_ACCOUNT_TYPE_MAP is configured (multi-account deployment),
+        the same gateway serves multiple accounts and must use the correct
+        account_type for each request. When no map is configured (the common
+        single-account case), this returns self.account_type unchanged.
+        """
+        return account_type_for(account_id, self.account_type)
+
     def _require_passorder(self):
         if self.passorder is None:
             raise RuntimeError("passorder is not available in Big QMT runtime")
@@ -482,7 +493,7 @@ class BigQmtOrderGateway:
             # them. Letting a futures opType fall through to 23/24 on a STOCK
             # account is the #103 failure mode again: 平今多 (a close) would go
             # out as an ordinary stock buy.
-            account_type = str(self.account_type or "").upper()
+            account_type = str(self._resolve_account_type(request.account_id or self.account_id) or "").upper()
             if account_type not in PASSTHROUGH_ACCOUNT_TYPES:
                 raise ValueError(
                     # ASCII only: this goes to QMT's own log, which drops
@@ -490,7 +501,7 @@ class BigQmtOrderGateway:
                     "order_type %s is a futures/option opType but account_type "
                     "is %r. Set account_type to one of %s, or use 23/24 for "
                     "stock orders." % (
-                        passthrough_optype, self.account_type,
+                        passthrough_optype, account_type,
                         "/".join(sorted(PASSTHROUGH_ACCOUNT_TYPES))))
             op_type = passthrough_optype
         elif action == SignalAction.BUY.value:
@@ -524,7 +535,8 @@ class BigQmtOrderGateway:
 
     def cancel(self, order_ref):
         cancel_func = self._require_cancel()
-        ok = cancel_func(order_ref.order_sys_id, self.account_id, self.account_type, self.context_info)
+        account_type = self._resolve_account_type(self.account_id)
+        ok = cancel_func(order_ref.order_sys_id, self.account_id, account_type, self.context_info)
         return CancelResult(success=bool(ok), message="" if ok else "cancel returned false")
 
     def query_orders(self, account_id, strategy_name):
@@ -535,7 +547,8 @@ class BigQmtOrderGateway:
 
     def query_orders_strict(self, account_id, strategy_name):
         query = self._require_query_func()
-        rows = query(account_id, self.account_type, "ORDER", strategy_name) or []
+        account_type = self._resolve_account_type(account_id)
+        rows = query(account_id, account_type, "ORDER", strategy_name) or []
         result = []
         account_type_code = self._account_type_code()
         name_cache = {}
@@ -599,14 +612,15 @@ class BigQmtOrderGateway:
 
     def query_trades_strict(self, account_id, strategy_name):
         query = self._require_query_func()
+        account_type = self._resolve_account_type(account_id)
         rows = []
         last_error = None
         for detail_type in ("DEAL", "TRADE"):
             try:
                 if str(strategy_name or "").strip():
-                    rows = query(account_id, self.account_type, detail_type, strategy_name) or []
+                    rows = query(account_id, account_type, detail_type, strategy_name) or []
                 else:
-                    rows = query(account_id, self.account_type, detail_type) or []
+                    rows = query(account_id, account_type, detail_type) or []
                 if rows:
                     break
             except Exception as exc:
@@ -726,7 +740,7 @@ class BigQmtOrderGateway:
         for detail_type in (detail_types or ("ORDER", "DEAL")):
             entry = {"rows": 0, "attributes": [], "error": ""}
             try:
-                rows = query(account_id, self.account_type, str(detail_type)) or []
+                rows = query(account_id, self._resolve_account_type(account_id), str(detail_type)) or []
                 entry["rows"] = len(rows)
                 if rows:
                     entry["attributes"] = _data_attribute_names(rows[0])
