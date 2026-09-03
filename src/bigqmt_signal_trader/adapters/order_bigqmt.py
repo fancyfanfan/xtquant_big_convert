@@ -420,7 +420,7 @@ class BigQmtOrderGateway:
             raise RuntimeError("cancel is not available in Big QMT runtime")
         return self.cancel_func
 
-    def _account_type_code(self):
+    def _account_type_code(self, account_id=None):
         """The account type as MiniQMT reports it: an xtconstant int.
 
         xttype.XtOrder/XtTrade both carry account_type, and real MiniQMT fills
@@ -429,8 +429,15 @@ class BigQmtOrderGateway:
         showed what silence costs: a credit account read as STOCK returns an
         all-zero asset row with no error. So report the configured type and
         fall back to SECURITY_ACCOUNT only when there is nothing to report.
+
+        When account_id is given and BIGQMT_ACCOUNT_TYPE_MAP is configured,
+        the per-request type is used instead of self.account_type (same #92
+        class of bug for multi-account deployments).
         """
-        text = str(self.account_type or "").strip().upper()
+        if account_id is not None and hasattr(self, "_resolve_account_type"):
+            text = str(self._resolve_account_type(account_id) or "").strip().upper()
+        else:
+            text = str(self.account_type or "").strip().upper()
         if text in ACCOUNT_TYPE_CODES:
             return ACCOUNT_TYPE_CODES[text]
         try:
@@ -550,7 +557,7 @@ class BigQmtOrderGateway:
         account_type = self._resolve_account_type(account_id)
         rows = query(account_id, account_type, "ORDER", strategy_name) or []
         result = []
-        account_type_code = self._account_type_code()
+        account_type_code = self._account_type_code(account_id)
         name_cache = {}
         for row in rows:
             try:
@@ -628,7 +635,7 @@ class BigQmtOrderGateway:
         if not rows and last_error is not None:
             raise last_error
         result = []
-        account_type_code = self._account_type_code()
+        account_type_code = self._account_type_code(account_id)
         name_cache = {}
         for row in rows:
             traded_at_raw = _attr(row, ("m_strTradeTime", "trade_time", "traded_at"), "")

@@ -29,11 +29,19 @@ _ACCOUNT_TYPE_MAP = None  # None = not loaded yet; {} = loaded but empty
 
 
 def _load_map():
-    """Load BIGQMT_ACCOUNT_TYPE_MAP from local config, or {} if absent."""
+    """Load BIGQMT_ACCOUNT_TYPE_MAP from local config, or {} if absent.
+
+    Uses importlib.import_module (not reload) to avoid:
+    1. Re-executing a config module that holds credentials.
+    2. QMT sandbox monkeypatched importlib (issue noted in PR #135 review):
+       the sandbox wraps importlib.reload with a custom loader that may fail
+       on C++ callback threads with SystemError.
+    Hot config changes should go through reload_deployment() → gateway init,
+    which reconstructs the entire object graph.
+    """
     global _ACCOUNT_TYPE_MAP
     try:
         cfg = importlib.import_module("bigqmt_signal_trader_local_config")
-        cfg = importlib.reload(cfg)
         _ACCOUNT_TYPE_MAP = dict(getattr(cfg, "BIGQMT_ACCOUNT_TYPE_MAP", {}) or {})
     except Exception:
         _ACCOUNT_TYPE_MAP = {}
