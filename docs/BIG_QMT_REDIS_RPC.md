@@ -285,7 +285,7 @@ bigqmt:order_events:{account_id}
 bigqmt:trade_events:{account_id}
 ```
 
-成交事件字段（由 `deal_callback` 的 `m_*` 映射）：`stock_code`(`m_strInstrumentID`)、`trade_id`(`m_strTradeID`)、`order_sys_id`(`m_strOrderSysID`)、`volume`(`m_nVolume`)、`price`(`m_dPrice`)、`amount`(`m_dTradeAmount`)、`commission`(`m_dComssion`)、`direction`(`m_nDirection`) 及 `action`(尽力映射 BUY/SELL)、`traded_at`(`m_strTradeTime`)。委托事件类似（`m_nOrderStatus`→`status`、`m_nVolumeTotal`→`order_volume`、`m_nVolumeTraded`→`traded_volume`、`m_dLimitPrice`→`price`、`m_dTradedPrice`→`traded_price`）。
+成交事件字段（由 `deal_callback` 的 `m_*` 映射）：`stock_code`(`m_strInstrumentID`)、`trade_id`(`m_strTradeID`)、`order_sys_id`(`m_strOrderSysID`)、`volume`(`m_nVolume`)、`price`(`m_dPrice`)、`amount`(`m_dTradeAmount`)、`commission`(`m_dComssion`)、`direction`(`m_nDirection`) 及 `action`(尽力映射 BUY/SELL)、`traded_at`(`m_strTradeTime`)。委托事件类似（`m_nOrderStatus`→`status`、`m_nVolumeTotal`→`order_volume`、`m_nVolumeTraded`→`traded_volume`、`m_dLimitPrice`→`price`、`m_dTradedPrice`→`traded_price`、`m_dTradeAmount`→`trade_amount`）。委托的 `trade_amount` 是柜台的精确成交金额；取不到时为 0.0，不会用 `traded_price × traded_volume` 估算顶替（#173）。
 
 客户端用法（MiniQMT 风格，回调实时触发）：
 

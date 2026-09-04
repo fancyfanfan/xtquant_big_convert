@@ -595,6 +595,18 @@ class BigQmtOrderGateway:
                     traded_price=float(
                         _attr(row, ("m_dTradedPrice", "traded_price", "avg_traded_price"), 0.0) or 0.0
                     ),
+                    # 柜台的精确成交金额 (issue #173). ccxt 的 order["cost"]
+                    # 要的就是它。以前只有 DEAL 行透出 amount, 所以拿委托的
+                    # cost 得按 order_sysid 聚合成交 (多一次 RPC), 或者用
+                    # traded_price * traded_volume 估 -- 单笔成交两者相等,
+                    # 分笔成交时成交均价有舍入, 会和柜台差几分。
+                    # 这个终端的 ORDER 行确实带 m_dTradeAmount: 实盘
+                    # describe_trade_detail_fields 查 14 笔委托, 13 笔是四到
+                    # 五位数的金额, 唯一为 0.0 的那笔正是 traded_volume 为 0
+                    # 的未成交委托。
+                    trade_amount=float(
+                        _attr(row, ("m_dTradeAmount", "trade_amount", "amount"), 0.0) or 0.0
+                    ),
                     # MiniQMT XtOrder carries these and this bridge never sent
                     # them, so every client saw AttributeError (issue #133).
                     account_type=account_type_code,

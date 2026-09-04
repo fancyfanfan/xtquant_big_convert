@@ -4409,6 +4409,13 @@ class BigQmtXtTrader:
             traded_price=_safe_float(
                 item.get("traded_price", item.get("avg_traded_price", item.get("m_dTradedPrice")))
             ),
+            # 柜台的精确成交金额 (issue #173) -- ccxt 适配层的
+            # order["cost"]。旧部署不发这个键，那就是 0.0；不在这里
+            # 拿 traded_price × traded_volume 兑，因为那是估算值，让它
+            # 冒充柜台金额正好是这个 issue 要避开的事。
+            trade_amount=_safe_float(
+                item.get("trade_amount", item.get("m_dTradeAmount"))
+            ),
             order_sysid=order_sysid,
             # MiniQMT: order_id is the int 委托编号, order_sysid the string
             # 柜台编号. Both, from one 合同编号 (issue #113).
