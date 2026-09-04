@@ -99,6 +99,34 @@ def _attr(obj, names, default=None):
     return default
 
 
+# 报单来源. passorder's 8th argument (strategyName) comes back on the callback
+# under this name, not m_strStrategyName -- which is why #174 read "the row
+# does not carry the strategy name" off a dump that contained it. #154 measured
+# it on a live terminal: blank on the 13 hand-placed rows, the strategy name on
+# the 3 the bridge sent, while m_strStrategyName was blank on all 16. Last, so
+# a terminal that does populate a real strategy-name field still wins.
+_STRATEGY_NAME_FIELDS = (
+    "strategyName", "m_strStrategyName", "strategy_name", "m_strSource",
+)
+
+
+def _strategy_name_of(obj):
+    """First NON-EMPTY strategy-name candidate, or "".
+
+    Deliberately not _attr: that returns the first non-None, and "" is not
+    None. A terminal carrying m_strStrategyName as an empty string would stop
+    there and never reach m_strSource -- answering "unnamed" while the name is
+    on the object. An empty source is a real answer (a hand-placed order), so
+    it has to fall through rather than short-circuit.
+    """
+    for name in _STRATEGY_NAME_FIELDS:
+        value = _attr(obj, [name], "")
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
 def _with_exchange_suffix(raw_code, obj):
     """Append the exchange suffix to a bare instrument code.
 
@@ -381,9 +409,12 @@ def normalize_order_event(order, account_id=""):
         "direction": direction,
         "action": _action_from_direction(direction),
         "offset_flag": _attr(order, ["m_nOffsetFlag", "offset_flag"]),
-        "strategy_name": str(_attr(order, ["strategyName", "m_strStrategyName", "strategy_name"], "") or ""),
-        # QMT sometimes puts the name right on the object; usually absent and
-        # the publisher fills it from ContextInfo (issue #161).
+        # 报单来源 (m_strSource) is where passorder's strategyName lands, so an
+        # order this bridge sent names itself here -- no identity store, no
+        # remark matching, and it still works for one submitted before this
+        # process started (issue #174). The publisher enriches from the journal
+        # / redis only when this comes back empty.
+        "strategy_name": _strategy_name_of(order),
         "instrument_name": str(
             _attr(order, ["m_strInstrumentName", "instrument_name"], "") or ""),
         "remark": str(_attr(order, ["m_strRemark", "order_remark", "remark", "user_order_id"], "") or ""),
@@ -432,11 +463,16 @@ def remember_order_identity(redis_client, account_id, user_order_id, strategy_na
 def order_identity_map(redis_client, account_id, user_order_ids, limit=500):
     """user_order_id -> remembered identity, for a whole result set at once.
 
-    QMT does not put the strategy name on the rows get_trade_detail_data
-    returns -- neither ORDER nor DEAL rows have m_strStrategyName (verified by
-    listing every attribute on a live terminal: 120 and 47 of them
-    respectively, and it is in neither). It filters BY strategy internally, but
-    it will not tell you what the name was.
+    Neither ORDER nor DEAL rows have m_strStrategyName (verified by listing
+    every attribute on a live terminal: 120 and 47 of them respectively, and it
+    is in neither).
+
+    That was read as "QMT will not tell you the name", which was wrong -- it
+    tells you under another name, 报单来源 / m_strSource, and
+    _strategy_name_of reads it now (issue #174). This map still earns its keep
+    for the case the row cannot cover: an order placed through some OTHER
+    channel that the bridge nonetheless remembered, and rows from a terminal
+    that blanks the source.
 
     For orders this bridge submitted, it is remembered here at submit time
     (remember_order_identity), keyed by the user_order_id that goes out as the
@@ -541,12 +577,12 @@ def normalize_trade_event(trade, account_id=""):
         # 所以客户端 item.get("strategy_name") or "" 只可能答 ""。委托事件一直
         # 有, 成交没有, 于是 on_stock_trade 拿不到策略名。
         #
-        # 大 QMT 自己不给: 实盘列全部属性, ORDER 行 120 个、DEAL 行 47 个,
-        # m_strStrategyName 两边都没有 (和 #133 的 m_strShareholderID 同一形态)。
-        # 所以这里基本恒为 ""，真正把名字放回去的是发布路径上的身份补全 --
-        # 留着读一遍是因为别家券商的 QMT 可能带。
-        "strategy_name": str(
-            _attr(trade, ["strategyName", "m_strStrategyName", "strategy_name"], "") or ""),
+        # m_strStrategyName 确实两边都没有 (实盘列全部属性: ORDER 120 个、
+        # DEAL 47 个)。但当时据此下的结论 ——「大 QMT 不给策略名」—— 是错的:
+        # 名字在 m_strSource (报单来源) 里, 就是 passorder 的第 8 个参数
+        # strategyName 原样回来。#174 报告人的 dump 里委托和成交都带着它。
+        # 所以桥接器自己下的单在这里就能自报家门, 补全只是兜底。
+        "strategy_name": _strategy_name_of(trade),
         # 官方 Deal 字段 m_strTradeDate+m_strTradeTime -> 真实成交 Unix 秒。
         # 0 = 未携带, 客户端会退回 created_at_ts。
         "traded_time": date_time_seconds(

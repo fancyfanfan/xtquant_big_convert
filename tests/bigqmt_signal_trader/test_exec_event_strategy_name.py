@@ -26,6 +26,14 @@ same shape as `m_strShareholderID` in #133. The live query path confirms it:
 14 orders, `strategy_name` empty on every one. So the only way back is what
 the bridge remembered at submit time, keyed by the remark.
 
+**Superseded in part** -- see test_order_source_strategy_name.py. "big QMT
+does not put the strategy name on the row" was the wrong conclusion from a
+true observation: m_strStrategyName is indeed absent, but the name comes back
+in 报单来源 (m_strSource), which is what passorder was handed as strategyName.
+The reporter's own raw_fields carried it on both callbacks. Everything below
+about the missing trade key and the identity-store fallback still holds; it is
+just no longer the only way back.
+
 That store was read from Redis only. On a zmq deployment whose Redis is
 configured but not reachable -- which is exactly the "configured is not
 reachable" trap in #145 -- the lookup fails silently and the name stays empty.

@@ -1705,9 +1705,15 @@ def _local_identity_strategy_name(account_id, event):
 def _enrich_event_identity(exec_events, config, account_id, event):
     """Put the strategy name back on an event QMT could not name (#174).
 
-    Big QMT does not carry it on order or deal objects -- 120 and 47
-    attributes on a live terminal, m_strStrategyName in neither -- so what the
-    bridge remembered at submit time is the only way back.
+    Most events no longer get here: normalize_*_event reads the name off
+    报单来源 (m_strSource), which is passorder's own strategyName argument
+    coming back, so an order this bridge placed names itself and returns at the
+    first line below. m_strStrategyName really is absent (120 and 47 attributes
+    on a live terminal, in neither) -- concluding from that alone that the name
+    was absent too is what made this function the only way back.
+
+    It stays as the fallback for what the row cannot answer: a terminal that
+    blanks the source, and orders whose name only the bridge ever knew.
 
     The in-process journal is consulted FIRST, and deliberately so. This runs
     on QMT's C++ callback thread, and for an order this process submitted the

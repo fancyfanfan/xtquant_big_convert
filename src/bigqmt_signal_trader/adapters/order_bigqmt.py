@@ -128,6 +128,29 @@ def _first_nonzero(row, names, default=0.0):
     return default
 
 
+# 报单来源 last -- see exec_events._STRATEGY_NAME_FIELDS for why it belongs
+# here at all. Same list on the query path and the callback path, so a row and
+# the event for the same order cannot disagree about who placed it.
+_STRATEGY_NAME_FIELDS = (
+    "m_strStrategyName", "strategy_name", "m_strSource",
+)
+
+
+def _row_strategy_name(row):
+    """First NON-EMPTY strategy-name candidate on a QMT row, or "".
+
+    _attr stops at the first non-None and "" is not None, so m_strStrategyName
+    present-but-blank -- which is what this terminal reports for every row --
+    would shadow m_strSource and answer "unnamed" for an order that names
+    itself.
+    """
+    for name in _STRATEGY_NAME_FIELDS:
+        text = str(_attr(row, (name,), "") or "").strip()
+        if text:
+            return text
+    return ""
+
+
 def _data_attribute_names(row):
     """Public non-callable attribute names on a QMT row object.
 
@@ -583,10 +606,11 @@ class BigQmtOrderGateway:
                     # passed the filter yet reported strategy_name="" (issue
                     # #156 follow-up). When a filter is given, every row
                     # belongs to it by construction.
-                    strategy_name=str(
-                        _attr(row, ("m_strStrategyName", "strategy_name"), "")
-                        or strategy_name or ""
-                    ),
+                    #
+                    # The row's own 报单来源 now counts as "the row said so"
+                    # (issue #174), so an unfiltered query names bridge-placed
+                    # orders instead of leaning on the identity store.
+                    strategy_name=_row_strategy_name(row) or strategy_name or "",
                     price=float(_attr(row, ("m_dLimitPrice", "m_dPrice", "price"), 0.0) or 0.0),
                     remark=str(_attr(row, ("m_strRemark", "remark"), "") or ""),
                     order_time=_order_time_seconds(row),
@@ -678,18 +702,18 @@ class BigQmtOrderGateway:
                     # 官方 Deal 字段: m_dTradeAmount 成交额; m_strTradeDate+
                     # m_strTradeTime 合成 Unix 秒; 策略名来自查询过滤参数。
                     amount=float(_attr(row, ("m_dTradeAmount", "amount"), 0.0) or 0.0),
-                    # The row's own strategy name first -- though on this
-                    # terminal there is none: neither ORDER nor DEAL rows carry
-                    # m_strStrategyName. QMT filters by strategy without ever
-                    # reporting it, which is why the field read "" for
-                    # everything (issue #133). The filter is the fallback: when
-                    # one IS given every row belongs to it by construction. For
-                    # orders this bridge submitted, the RPC layer puts the real
-                    # name back from the identity store.
-                    strategy_name=str(
-                        _attr(row, ("m_strStrategyName", "strategy_name"), "")
-                        or strategy_name or ""
-                    ),
+                    # The row's own strategy name first. m_strStrategyName is
+                    # genuinely absent here -- but the name is not: it comes
+                    # back in 报单来源 (m_strSource), which is passorder's
+                    # strategyName argument (issue #174, and #154 measured it).
+                    # Reading only m_strStrategyName is why this field answered
+                    # "" for everything (issue #133).
+                    #
+                    # The filter is the fallback: when one IS given every row
+                    # belongs to it by construction. For orders this bridge
+                    # submitted with no filter, the RPC layer still backstops
+                    # from the identity store.
+                    strategy_name=_row_strategy_name(row) or strategy_name or "",
                     traded_time=date_time_seconds(
                         _attr(row, ("m_strTradeDate", "trade_date", "m_strDealDate")),
                         traded_at_raw,
