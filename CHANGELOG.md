@@ -7,6 +7,16 @@
 
 ### 新增
 
+- **`probe_capabilities` 新增 `order_watch`：回答「#164 在这台部署上到底生效没有」**：#164 的接线在 `bigqmt_signal_trader_strategy.py` 里，而 `reload_deployment()` **刷不了顶层文件** —— 也就是说一棵代码齐全的部署树完全可能仍在跑旧的轮询路径，而**没有任何办法分辨**。
+
+  ```json
+  {"wired": true, "remarks": 0, "statuses": 1, "max_entries": 5000, "ttl_seconds": 86400.0}
+  ```
+
+  只报计数，不报 remark 和委托号 —— 那两个是委托标识。`wired` 即「重启是否已生效」。
+
+  实盘用它验完了 #164：策略重启后手工挂撤一笔，`statuses` 0 → 1，证明 QMT 的 `order_callback` 确实在喂表。顺带查出**该功能之前根本没同步到部署**（`order_watch.py` 缺失），而 `redis_rpc.py` 的 `getattr` 兜底让它安静地退回轮询 —— 防御是对的，但功能哑了也看不出来，正是这个探针要解决的问题。
+
 - **`BIGQMT_ACCOUNT_TYPE_MAP`：一个 QMT 进程同时服务股票和期货账号**（PR #135，@fancyfanfan）：网关的 `account_type` 原来是 init 时定死的，单账号部署没问题；一个策略实例服务两个账号时，它必须跟着**请求的 account_id** 走，否则期货账号会被当成 STOCK 查 —— 和 #92 是同一类 bug（信用账号被当 STOCK 查会返回一整行 0 且不报错）。
 
   ```python

@@ -747,7 +747,34 @@ class BigQmtRpcHandlers:
                     "error": "%s: %s" % (exc.__class__.__name__, exc),
                 }
         info["sector_probe"] = self._probe_sector_channels()
+        info["order_watch"] = self._probe_order_watch()
         return info
+
+    def _probe_order_watch(self):
+        """Is the callback-fed settlement table live here (issue #164)?
+
+        The table is wired onto the handlers by bigqmt_signal_trader_strategy,
+        a top-level file QMT execs -- reload_deployment cannot refresh it. So a
+        deployment can carry every line of the #164 code and still be running
+        the old poll loop until someone restarts the strategy, with nothing to
+        tell the two apart. This says which one is running.
+
+        Counts only: remarks and order ids identify orders.
+        """
+        table = getattr(self, "order_watch_table", None)
+        if table is None:
+            return {
+                "wired": False,
+                "note": ("settlement is polling; the watch table is wired in "
+                         "the strategy file, which needs a strategy RESTART "
+                         "(reload_deployment cannot refresh it)"),
+            }
+        report = {"wired": True}
+        try:
+            report.update(table.stats())
+        except Exception as exc:
+            report["stats_error"] = "%s: %s" % (exc.__class__.__name__, exc)
+        return report
 
     # 板块通道探测（issue #143）。写入板块有三条可能的通道，名字还各不相同：
     #   * ContextInfo.create_sector           大 QMT 内置 Python

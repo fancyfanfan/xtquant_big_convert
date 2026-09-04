@@ -70,6 +70,23 @@ class OrderWatchTable(object):
                 return None
             return sysid
 
+    def stats(self):
+        """Counts only -- how much the callbacks have taught this table.
+
+        Remarks and order ids are order identifiers, so this reports sizes and
+        nothing else. It exists because "is #164 actually live on this
+        deployment" was otherwise unanswerable: the wiring happens in the
+        strategy file, which reload_deployment cannot refresh, so a tree that
+        has the code can still be running the old poll path until a restart.
+        """
+        with self._lock:
+            return {
+                "remarks": len(self._by_remark),
+                "statuses": len(self._status_by_sysid),
+                "max_entries": self.MAX_ENTRIES,
+                "ttl_seconds": self.TTL_SECONDS,
+            }
+
     def status_for_sysid(self, order_sys_id):
         """The latest status seen for this order_sys_id, or None."""
         sysid = str(order_sys_id or "").strip()
