@@ -2573,6 +2573,11 @@ class RedisPubSubRpcService:
             # problem. Lets clients see why an operation silently failed.
             "server_error": "",
             "handled_at": _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            # Wall clock, not perf_counter: the client is a separate process
+            # on the same machine, so these are directly comparable to its own
+            # time.time() and decompose the round trip into wait / handle /
+            # return without guessing (#104).
+            "_t_recv": time.time(),
         }
         try:
             if self.account_id and account_id and account_id != self.account_id:
@@ -2609,6 +2614,7 @@ class RedisPubSubRpcService:
                 return response
         except Exception as exc:
             response["error"] = "%s: %s" % (exc.__class__.__name__, exc)
+        response["_t_reply"] = time.time()
         try:
             self._publish_response(request, response)
         except Exception:
