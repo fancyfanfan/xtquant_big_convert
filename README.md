@@ -1449,6 +1449,19 @@ python qmt-trader/scripts/qmt.py buy 600000.SH 100 --price 7.50 --dry-run
 
 ---
 
+## 讨论组
+
+微信群「量化 qmt 交流群」——用微信扫码进群：
+
+<img src="docs/assets/wechat-group-qr.jpg" alt="量化 qmt 交流群" width="320">
+
+> **二维码会过期。** 这张是 2026-09-04 生成的，微信群邀请码 7 天有效（本张到 2026-09-11）。
+> 过期后扫码会提示无效 —— 这不是项目的问题，[开个 issue](https://github.com/litaolemo/xtquant_big_convert/issues) 说一声，会换新的。
+
+提 bug 和功能请求请走 [issue](https://github.com/litaolemo/xtquant_big_convert/issues)：群里的讨论不会被检索到，而 issue 会 —— 下一个遇到同样问题的人能搜到。
+
+---
+
 ## Star History
 
 <a href="https://www.star-history.com/?type=date&repos=litaolemo%2Fxtquant_big_convert">
