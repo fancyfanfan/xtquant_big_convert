@@ -91,7 +91,7 @@ if ($Conda) {
             $dlArgs = @("-L","--max-time","900","-o",$installer,$url)
             if ($Proxy) { $dlArgs = @("-x",$Proxy) + $dlArgs }
             & curl.exe @dlArgs
-            if ($LASTEXITCODE -ne 0) { throw "miniconda download failed (offline? pre-download and pass -MinicondaUrl <local exe path>)" }
+            if ($LASTEXITCODE -ne 0) { throw "miniconda download failed (offline? pre-download and pass -MinicondaUrl <local exe path>, or add -Proxy http://...)" }
         }
         # silent install; /D= must be the LAST argument, unquoted, no trailing backslash
         Start-Process -FilePath $installer -ArgumentList "/InstallationType=JustMe","/AddToPath=0","/RegisterPython=0","/S","/D=$condaHome" -Wait
@@ -139,6 +139,9 @@ Ok "venv ready: $vpy"
 Step "2/7 copy bridge server files into QMT python dir"
 $src = (& $vpy -c "import bigqmt_signal_trader_strategy as m, os; print(os.path.dirname(m.__file__))").Trim()
 $dst = "$QmtDir\python"
+if ($src -eq $dst) {
+    throw ("source resolved to the QMT python dir itself (" + $src + ") - the import picked up already-deployed files. Run the script from any other directory (e.g. the deploy folder).")
+}
 foreach ($item in @("bigqmt_signal_trader","bigqmt_signal_trader_strategy.py",
                     "bigqmt_signal_trader_redis_rpc_runtime.py","BIGQMT_REDIS_DRYRUN.py")) {
     Copy-Item (Join-Path $src $item) (Join-Path $dst $item) -Recurse -Force
@@ -156,7 +159,7 @@ if (-not (Test-Path $RedisZip)) {
       "https://github.com/tporadowski/redis/releases/download/v5.0.14/Redis-x64-5.0.14.zip")
     if ($Proxy) { $dlArgs = @("-x",$Proxy) + $dlArgs }
     & curl.exe @dlArgs
-    if ($LASTEXITCODE -ne 0) { throw "redis download failed (offline? pass -RedisZip <path>)" }
+    if ($LASTEXITCODE -ne 0) { throw "redis download failed (github.com unreachable; pass -RedisZip <path> for offline use, or add -Proxy http://...)" }
 }
 if (-not (Test-Path "$rdir\Redis-x64-5.0.14\redis-server.exe")) {
     Expand-Archive $RedisZip "$rdir\Redis-x64-5.0.14" -Force
