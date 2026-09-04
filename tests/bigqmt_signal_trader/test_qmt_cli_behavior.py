@@ -213,5 +213,57 @@ class KlineStatsTest(CliTestBase):
         self.assertEqual(stats["low"], 8.5)    # closes 的最小值是 9.0
 
 
+def _trade_row(**kw):
+    """一行成交, 字段名照 xtquant_compat._trade_from_dict 构造的对象来。"""
+    base = dict(
+        account_id="ACC", stock_code="601398.SH", order_type=23,
+        order_sysid="xt123", order_id=878651294, trade_id="t1",
+        traded_volume=100, traded_price=8.08, traded_at="2026-09-04 10:01:02",
+        order_remark="r", strategy_name="alpha_v2",
+    )
+    base.update(kw)
+    return types.SimpleNamespace(**base)
+
+
+class TradeStrategyNameTest(CliTestBase):
+    """成交行的 strategy_name 到了 CLI 就被丢掉了 (issue #174)。
+
+    #174 给的绕行办法是「回调拿不到策略名时用查询兜一下」—— 查询路径
+    确实补全了 (`_attribute_to_strategies`), 实盘只读核对过服务端发的
+    成交行**带** strategy_name 这个键。但本仓库自己的 CLI 在
+    `_trade_to_dict` 里没列这个字段, 委托的 `_order_to_dict` 列了。
+    所以照着绕行办法用 `qmt.py trades` 去查的人, 看到的是「查询路径也
+    没有策略名」—— 字段是在最后一步被丢掉的, 不是没送到。
+    """
+
+    def test_trades_row_carries_strategy_name(self):
+        trader = mock.Mock()
+        trader.query_stock_trades.return_value = [_trade_row()]
+        args = argparse.Namespace(account=None, strategy=None, table=False)
+        with mock.patch.object(self.cli, "_init", return_value=(trader, None, None)), \
+             mock.patch.object(self.cli, "_acc_or", return_value="ACC"):
+            out = self._run(self.cli.cmd_trades, args)
+        row = out["data"]["trades"][0]
+        self.assertIn("strategy_name", row)
+        self.assertEqual(row["strategy_name"], "alpha_v2")
+
+    def test_missing_strategy_name_is_none_not_empty_string(self):
+        """旧部署不发这个字段时给 None, 和 trade_amount(#173) 一个道理。
+
+        「服务端没告诉我」和「策略名确实是空」是两回事, 后者说明这笔单
+        不是本桥下的 (手工单没有备注可查), 前者说明该升级服务端了。
+        兜底成 "" 会把这两种情况抹平。
+        """
+        trader = mock.Mock()
+        row_without = _trade_row()
+        del row_without.strategy_name
+        trader.query_stock_trades.return_value = [row_without]
+        args = argparse.Namespace(account=None, strategy=None, table=False)
+        with mock.patch.object(self.cli, "_init", return_value=(trader, None, None)), \
+             mock.patch.object(self.cli, "_acc_or", return_value="ACC"):
+            out = self._run(self.cli.cmd_trades, args)
+        self.assertIsNone(out["data"]["trades"][0]["strategy_name"])
+
+
 if __name__ == "__main__":
     unittest.main()
