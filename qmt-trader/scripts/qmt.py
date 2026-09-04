@@ -162,10 +162,36 @@ def _print_table(rows, headers=None):
             print(r)
 
 
-def _ok(data, table=False, headers=None):
+def _table_rows(data, table_key=None):
+    """The rows a --table render should show.
+
+    A command's payload is shaped for JSON, and that shape is usually a
+    wrapper: ``{"orders": [...], "count": 14}``. This used to hand the wrapper
+    itself to _print_table as a single row, so every header lookup missed and
+    the output was the header, the separator, and one line of spaces -- for
+    any amount of data. Five commands rendered that way (positions, orders,
+    trades, tick, kline).
+
+    ``table_key`` names the tabular list inside the wrapper. Without one:
+    a dict whose values are ALL dicts is keyed by something (tick is
+    ``{code: {...}}``) and its rows are the values; anything else is a single
+    flat record and stays one row -- account and instrument really are that,
+    and were correct before.
+    """
+    if table_key and isinstance(data, dict) and table_key in data:
+        data = data[table_key]
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict) and data and all(
+            isinstance(value, dict) for value in data.values()):
+        return list(data.values())
+    return [data]
+
+
+def _ok(data, table=False, headers=None, table_key=None):
     out = {"ok": True, "data": data, "ts": datetime.now().isoformat(timespec="seconds")}
     if table:
-        _print_table(data if isinstance(data, list) else [data], headers)
+        _print_table(_table_rows(data, table_key), headers)
     else:
         _print_json(out)
 
@@ -342,7 +368,7 @@ def cmd_positions(args):
         "total_market_value": round(sum(r.get("market_value") or 0 for r in rows), 2),
         "total_profit": round(sum(r.get("profit") or 0 for r in rows), 2),
     }
-    _ok({"positions": rows, "summary": summary}, table=args.table,
+    _ok({"positions": rows, "summary": summary}, table=args.table, table_key="positions",
         headers=["stock_code", "stock_name", "volume", "can_use_volume", "avg_price", "price", "market_value", "profit", "profit_pct"])
 
 
@@ -358,7 +384,7 @@ def cmd_orders(args):
     except Exception as e:
         _err("查询委托失败", detail=str(e), code="QUERY_FAIL")
     rows = [_order_to_dict(o) for o in (orders or [])]
-    _ok({"orders": rows, "count": len(rows)}, table=args.table,
+    _ok({"orders": rows, "count": len(rows)}, table=args.table, table_key="orders",
         headers=["stock_code", "order_type_name", "order_status_name", "order_volume", "traded_volume", "price", "trade_amount", "order_sysid", "cancelable"])
 
 
@@ -370,7 +396,7 @@ def cmd_trades(args):
     except Exception as e:
         _err("查询成交失败", detail=str(e), code="QUERY_FAIL")
     rows = [_trade_to_dict(t) for t in (trades or [])]
-    _ok({"trades": rows, "count": len(rows)}, table=args.table,
+    _ok({"trades": rows, "count": len(rows)}, table=args.table, table_key="trades",
         headers=["stock_code", "order_type_name", "traded_volume", "traded_price", "traded_at", "order_sysid"])
 
 
@@ -463,7 +489,8 @@ def cmd_kline(args):
         if len(closes) >= 60:
             stats["ma60"] = round(sum(closes[-60:]) / 60, 3)
     _ok({"code": args.code, "period": args.period, "bars": records, "stats": stats},
-        table=args.table, headers=["time", "open", "high", "low", "close", "volume"])
+        table=args.table, table_key="bars",
+        headers=["time", "open", "high", "low", "close", "volume"])
 
 
 def cmd_instrument(args):

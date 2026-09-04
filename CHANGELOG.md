@@ -25,6 +25,22 @@
 
 ### 修复
 
+- **`qmt.py --table` 不再只画一行空白**（读 CLI，随 #173 的实盘确认一起发现）：`orders --table` 画出表头、分隔线，然后一行纯空格 —— 不管返回了多少数据。同一个查询不加 `--table` 是好的（`count=14`，字段齐全），所以数据没问题，坏的只有渲染。
+
+  子命令交给 `_ok` 的是**为 JSON 设计的形状**，而那通常是个包装：
+
+  ```python
+  _ok({"orders": rows, "count": 14}, table=..., headers=[...])
+  ```
+
+  而 `_ok` 里是 `_print_table(data if isinstance(data, list) else [data], headers)` —— 包装是 dict 不是 list，于是被再包一层当成**一行**，每个表头（`stock_code` …）在它身上都查不到，全渲染成空字符串。
+
+  实测受影响的是 **positions / orders / trades / tick / kline 五个**；**account 和 instrument 本来就是对的**，它们确实只返回一条扁平记录，一行才是正确答案。所以修法不能是"永远取 values"，那会把这两个也弄坏。
+
+  现在 `_ok` 多一个 `table_key` 参数指明包装里哪个键是表格数据（`positions` / `orders` / `trades` / `bars`）；没给 `table_key` 时，**值全是 dict** 的字典按"按键索引"处理、行取 values（`tick` 是 `{code: {...}}`），其余仍当作单条扁平记录。
+
+  已实盘验证（只读）：account 1 行、positions 10 行、orders 14 行、trades 17 行、tick 2 行、kline 3 行，行数与实际数据逐一对上。新测试 10 条，修复前 8 条红 —— 另外 2 条正是 account / instrument 的回归保护，修复前后都该绿。
+
 - **周线（1w）的 preClose 不再恒为 0.0**（#166，@yucejade 报告）：大 QMT 对 `1w` 的每一根 bar 都返回 `preClose = 0.0`。实测（国金 2.1.19.0 / 0.3.19，只读）受影响的**只有 1w**：
 
   ```
