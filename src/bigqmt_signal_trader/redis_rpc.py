@@ -748,7 +748,27 @@ class BigQmtRpcHandlers:
                 }
         info["sector_probe"] = self._probe_sector_channels()
         info["order_watch"] = self._probe_order_watch()
+        info["reply_residency"] = self._probe_reply_residency()
         return info
+
+    def _probe_reply_residency(self):
+        """How long finished replies wait for the transport to send them.
+
+        Handlers run on the adjust thread, so on zmq every reply is queued for
+        the router thread and only leaves at the top of its loop. This says
+        whether that wait is where the round trip goes (#104).
+        """
+        transport = getattr(self, "rpc_transport", None)
+        stats = getattr(transport, "reply_residency_stats", None)
+        if not callable(stats):
+            return {"available": False}
+        try:
+            report = dict(stats())
+        except Exception as exc:
+            return {"available": False,
+                    "error": "%s: %s" % (exc.__class__.__name__, exc)}
+        report["available"] = True
+        return report
 
     def _probe_order_watch(self):
         """Is the callback-fed settlement table live here (issue #164)?
@@ -2278,6 +2298,13 @@ class RedisPubSubRpcService:
                 print_prefix=print_prefix,
             )
         self._transport = transport
+        # Let the handlers reach the transport for read-only diagnostics
+        # (reply-queue residency, #104). Set here rather than in the
+        # strategy file so a reload picks it up without a restart.
+        try:
+            self.handlers.rpc_transport = transport
+        except Exception:
+            pass
         # Route inbound raw payloads through the service's dispatch (which
         # applies the inline-vs-deferred fork) instead of transport.deliver().
         self._transport.on_raw_payload = self._handle_received_payload

@@ -142,6 +142,7 @@ class ZmqTransport(RpcTransport):
         self._router = None
         self._router_thread = None
         self._actual_bind_address = None  # set after start_receiving()
+        self._reply_residency = {"count": 0, "sum_ms": 0.0, "max_ms": 0.0}
         self._pending_identities = {}  # request_id -> client identity bytes
         self._identity_lock = threading.Lock()
         self._response_queue = queue.Queue()
@@ -380,9 +381,10 @@ class ZmqTransport(RpcTransport):
     def _drain_response_queue(self):
         while True:
             try:
-                identity, payload = self._response_queue.get_nowait()
+                identity, payload, queued_at = self._response_queue.get_nowait()
             except queue.Empty:
                 return
+            self._note_reply_residency((time.perf_counter() - queued_at) * 1000.0)
             try:
                 self._router.send_multipart([identity, payload])
                 self._sent_response_count += 1
@@ -391,11 +393,37 @@ class ZmqTransport(RpcTransport):
             except Exception as exc:
                 print("%s zmq send failed: %s" % (self.print_prefix, exc))
 
+    def _note_reply_residency(self, ms):
+        """How long a finished reply waited for the router loop to come round.
+
+        Measured because the round trip did not add up: ping handles in 0.1ms
+        and the adjust tick is 96ms, yet a request takes ~300ms end to end and
+        throughput sits at ~3.3/s no matter how many clients ask (#104).
+        """
+        stats = self._reply_residency
+        stats["count"] += 1
+        stats["sum_ms"] += ms
+        if ms > stats["max_ms"]:
+            stats["max_ms"] = ms
+
+    def reply_residency_stats(self):
+        stats = dict(self._reply_residency)
+        count = stats.get("count") or 0
+        stats["avg_ms"] = round(stats["sum_ms"] / count, 1) if count else 0.0
+        stats["max_ms"] = round(stats["max_ms"], 1)
+        stats["sum_ms"] = round(stats["sum_ms"], 1)
+        return stats
+
     def _queue_response(self, identity, payload, reason=""):
         # 出站堆积时让位排队而不是阻塞 router 线程：队列有上限，满时丢最旧
         # 并记日志（读类请求超时可重试，比全管道停摆好）。
         self._queued_response_count += 1
-        self._response_queue.put((identity, payload))
+        # Stamped so _drain_response_queue can report how long a reply sat
+        # here. The handler runs on the adjust thread, so every reply takes
+        # this path, and the queue is only drained at the top of the router
+        # loop -- after a recv_multipart that blocks up to RCVTIMEO. That
+        # residency, not the handler, is where the round trip goes (#104).
+        self._response_queue.put((identity, payload, time.perf_counter()))
         if self._response_queue.qsize() > self._max_queued_responses:
             try:
                 self._response_queue.get_nowait()
