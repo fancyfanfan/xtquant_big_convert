@@ -95,6 +95,70 @@ def _as_list(value):
     return list(value)
 
 
+def _float_or_none(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number
+
+
+def _row_day(row):
+    """The YYYYMMDD a bar belongs to, from whichever time column it carries.
+
+    Bars come back keyed on stime/time/date depending on the build, and the
+    value may be a millisecond epoch, a 'YYYY-MM-DD ...' string, or already a
+    plain YYYYMMDD. Only the day matters here (issue #165 probes one day at a
+    time), so normalise to that and give up quietly on anything else.
+    """
+    for key in ("stime", "time", "date", "datetime", "timetag"):
+        raw = row.get(key)
+        if raw in (None, ""):
+            continue
+        text = str(raw).strip()
+        digits = "".join(ch for ch in text if ch.isdigit())
+        if len(digits) >= 13:                      # ms epoch
+            try:
+                import datetime as _d
+
+                return _d.datetime.fromtimestamp(int(digits[:13]) / 1000.0).strftime("%Y%m%d")
+            except Exception:
+                continue
+        if len(digits) >= 8:                       # YYYYMMDD, possibly with a time tail
+            return digits[:8]
+    return ""
+
+
+def _frame_rows(frame):
+    """A market-data frame as a list of row dicts, whatever shape it arrived in.
+
+    pandas DataFrame, this bridge's serialisable marker, a list of dicts, or a
+    dict of column arrays -- the same four shapes quote_utils deals with. No
+    pandas import: this also runs inside QMT's embedded Python.
+    """
+    if frame is None:
+        return []
+    if isinstance(frame, dict) and frame.get("__bigqmt_type__") == "DataFrame":
+        return _frame_rows(frame.get("records") or [])
+    if hasattr(frame, "columns") and hasattr(frame, "iloc"):
+        try:
+            columns = list(frame.columns)
+            return [{name: frame[name][i] for name in columns}
+                    for i in range(len(frame))]
+        except Exception:
+            return []
+    if isinstance(frame, (list, tuple)):
+        return [row for row in frame if isinstance(row, dict)]
+    if isinstance(frame, dict):
+        columns = {k: v for k, v in frame.items() if hasattr(v, "__len__")
+                   and not isinstance(v, (str, bytes))}
+        if not columns:
+            return [dict(frame)]
+        length = min(len(v) for v in columns.values())
+        return [{k: v[i] for k, v in columns.items()} for i in range(length)]
+    return []
+
+
 def _raw_frame_columns(field_list):
     columns = [str(field) for field in (field_list or [])]
     if columns and "stime" not in columns:
@@ -744,15 +808,128 @@ class BigQmtMarketDataProvider:
             shapes.extend(self._market_data_shapes("get_market_data", **kwargs))
         return self._call_first_supported(shapes)
 
+    # Probing more than this many candidate ex-dividend days in one range
+    # request is a sign the filter did not narrow anything (a code with no
+    # daily bars, say). Stop rather than issue hundreds of RPCs.
+    _DIVID_MAX_PROBES = 40
+    # Prices are 2-3 decimals; this is well inside a real dividend and well
+    # outside float noise.
+    _DIVID_PRICE_EPSILON = 1e-4
+
     def get_divid_factors(self, stock_code, start_time="", end_time=""):
-        # ContextInfo stub: get_divid_factors(marketAndStock, date='') — only 2
-        # positional args (code + a single date). The xtdata SDK has the same
-        # 2-arg shape. We accept start_time/end_time for API compatibility but
-        # pass end_time (or start_time) as the single date when supplied.
-        date = end_time or start_time
-        if date:
-            return self._call_context("get_divid_factors", stock_code, date)
-        return self._call_context("get_divid_factors", stock_code)
+        """Dividend factors over a RANGE, not just one day (issue #165).
+
+        This used to collapse any range to ``end_time or start_time`` and ask
+        for that single day. Since a given day is almost never an ex-dividend
+        day, a range request answered ``{}`` -- and an empty dict is
+        indistinguishable from "no events in this range". A reporter's nightly
+        whole-market factor sync ran that way for a month: every symbol
+        returned empty, the factor table silently stopped updating, and nothing
+        errored because K-lines kept arriving normally.
+
+        The old comment claimed "the xtdata SDK has the same 2-arg shape". It
+        does not -- the terminal's bundled SDK is
+        ``get_divid_factors(stock_code, start_time, end_time)``. So try the
+        range shapes first, and only fall back to expanding the range here.
+
+        The expansion does not walk every trading day. An ex-dividend day is
+        exactly a day whose ``preClose`` differs from the previous bar's
+        ``close`` (that is what the adjusted reference price means), so one
+        daily-bar read narrows a two-year window to a handful of candidates,
+        and only those get probed.
+        """
+        start = str(start_time or "").strip()
+        end = str(end_time or "").strip()
+        if not start and not end:
+            return self._call_context("get_divid_factors", stock_code)
+        if not start or not end or start == end:
+            # A single day was asked for; answer it directly.
+            return self._call_context("get_divid_factors", stock_code, end or start)
+
+        for shape in (
+            lambda: self._native_divid_factors(stock_code, start, end),
+            lambda: self._call_context("get_divid_factors", stock_code, start, end),
+        ):
+            try:
+                answer = shape()
+            except Exception:
+                continue
+            if answer:
+                return dict(answer)
+
+        return self._expand_divid_factors(stock_code, start, end)
+
+    def _native_divid_factors(self, stock_code, start_time, end_time):
+        module = self._native()
+        func = getattr(module, "get_divid_factors", None) if module is not None else None
+        if not callable(func):
+            return None
+        return func(stock_code, start_time, end_time)
+
+    def _divid_candidate_days(self, stock_code, start_time, end_time):
+        """Days in the window that look like ex-dividend days.
+
+        preClose on an ex-dividend day is the adjusted reference price, so it
+        differs from the previous bar's raw close. Everywhere else the two are
+        equal -- measured on this terminal across 649 daily bars, they matched
+        on all but the handful of genuine ex-dividend days.
+        """
+        frame = (self.get_market_data_ex(
+            field_list=["close", "preClose", "stime"], stock_list=[stock_code],
+            period="1d", start_time=start_time, end_time=end_time,
+            dividend_type="none", fill_data=False) or {}).get(stock_code)
+        rows = _frame_rows(frame)
+        self._divid_scan_rows = len(rows)
+        candidates = []
+        previous_close = None
+        for row in rows:
+            close = _float_or_none(row.get("close"))
+            pre_close = _float_or_none(row.get("preClose"))
+            day = _row_day(row)
+            if day and pre_close:
+                if previous_close is None:
+                    candidates.append(day)      # first bar: no previous to compare
+                elif abs(pre_close - previous_close) > self._DIVID_PRICE_EPSILON:
+                    candidates.append(day)
+            if close:
+                previous_close = close
+        return candidates
+
+    def _expand_divid_factors(self, stock_code, start_time, end_time):
+        """Aggregate single-day lookups over the candidate days.
+
+        Raises rather than returning ``{}`` when there were no daily bars to
+        scan. An empty dict would mean "no dividends in this range", and the
+        whole point of #165 is that a silent empty answer is what let a factor
+        table stop updating for a month unnoticed. No bars means we cannot
+        tell, and saying so is the only honest answer.
+        """
+        self._divid_scan_rows = 0
+        try:
+            candidates = self._divid_candidate_days(stock_code, start_time, end_time)
+        except Exception:
+            candidates = []
+        if self._divid_scan_rows < 2:
+            raise RuntimeError(
+                "get_divid_factors(%r, %s, %s) cannot answer a range here: big "
+                "QMT's ContextInfo takes only (code, single date), so the range "
+                "is expanded by scanning daily bars for ex-dividend days -- and "
+                "this terminal returned %d daily bar(s) for that window, too "
+                "few to compare even one preClose against the previous close. "
+                "Download "
+                "the daily history first (download_history_data), or ask one "
+                "date at a time. Returning {} would have been indistinguishable "
+                "from 'no dividends in this range' (issue #165)."
+                % (stock_code, start_time, end_time, self._divid_scan_rows))
+        merged = {}
+        for day in candidates[:self._DIVID_MAX_PROBES]:
+            try:
+                answer = self._call_context("get_divid_factors", stock_code, day)
+            except Exception:
+                continue
+            if answer:
+                merged.update(answer)
+        return merged
 
     def _download(self, func_name, sdk_args, sdk_kwargs, ctx_call):
         """Download history in Big QMT.
