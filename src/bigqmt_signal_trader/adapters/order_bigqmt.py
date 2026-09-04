@@ -129,10 +129,15 @@ def _first_nonzero(row, names, default=0.0):
 
 
 # 报单来源 last -- see exec_events._STRATEGY_NAME_FIELDS for why it belongs
-# here at all. Same list on the query path and the callback path, so a row and
-# the event for the same order cannot disagree about who placed it.
+# here at all. Kept character-for-character the same as that table, so a row
+# and the event for the same order cannot disagree about who placed it; a
+# literal copy rather than an import, because order_bigqmt is on the sandbox's
+# single-file import graph. tests/.../test_order_source_strategy_name.py pins
+# the two together. "strategyName" cannot appear on a native ORDER/DEAL row
+# (and _attr here reads attributes only, never dict keys), so carrying it
+# costs a miss on a name no row has -- cheaper than two tables drifting apart.
 _STRATEGY_NAME_FIELDS = (
-    "m_strStrategyName", "strategy_name", "m_strSource",
+    "strategyName", "m_strStrategyName", "strategy_name", "m_strSource",
 )
 
 

@@ -58,6 +58,7 @@ sys.path.insert(0, os.path.join(ROOT, "src"))
 
 from bigqmt_signal_trader import exec_events  # noqa: E402
 from bigqmt_signal_trader.adapters.order_bigqmt import BigQmtOrderGateway  # noqa: E402
+from bigqmt_signal_trader.adapters import order_bigqmt  # noqa: E402
 
 
 class Row(object):
@@ -289,6 +290,32 @@ class QueryPathSourceTest(unittest.TestCase):
         gateway = self._gateway(order_rows=[self._order_row(m_strSource="")])
         row = gateway.query_orders_strict("39942929", "some_filter")[0]
         self.assertEqual(row.strategy_name, "some_filter")
+
+
+class CandidateTableTest(unittest.TestCase):
+    """Both paths must read the SAME names, in the same order.
+
+    They are two literal tuples in two modules on purpose: order_bigqmt does
+    not import exec_events, because the single-file build execs every module
+    inside a function body and the fewer cross-imports there are in that graph
+    the better. Duplication is what that costs, and drift is what it risks --
+    add a name to one table only and the same order answers one thing on the
+    callback and another on the query, which is precisely what the comment
+    above each table promises cannot happen. Pin them together instead.
+    """
+
+    def test_both_paths_read_the_same_candidate_names(self):
+        self.assertEqual(
+            order_bigqmt._STRATEGY_NAME_FIELDS,
+            exec_events._STRATEGY_NAME_FIELDS,
+        )
+
+    def test_the_report_source_is_read_last(self):
+        """A terminal that does fill a real strategy-name field still wins."""
+        for table in (exec_events._STRATEGY_NAME_FIELDS,
+                      order_bigqmt._STRATEGY_NAME_FIELDS):
+            self.assertEqual(table[-1], "m_strSource")
+            self.assertIn("m_strStrategyName", table)
 
 
 if __name__ == "__main__":
