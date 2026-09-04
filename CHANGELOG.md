@@ -5,6 +5,28 @@
 
 ## [未发布]
 
+### 性能
+
+- **zmq / mysql 现在也能走 adjust 线程 drain，实盘延迟降 4~6 倍**（#183，#104）：显式把 `rpc_background_threads` 设成 `False`，zmq/mysql 不再起自己的接收线程，改由 adjust 每 tick 直接收/处理/发，消掉全部跨线程 GIL 交接。配置里没写这个键时保持历史默认（开后台线程），所以不改配置的部署行为不变。
+
+  **实盘四格实测**（0.3.20，收盘后，`schedule_adjust_interval: "100nMilliSecond"`，同一套只读脚本，每格重启策略后现测）：
+
+  | 配置 | ping p50 / p90 | positions p50 / p90 | 串行吞吐（ping / positions） |
+  |---|---|---|---|
+  | zmq + 后台线程（本次改动前） | 404.5 / 408.0ms | 607.0 / 704.7ms | 2.4 / 1.7 次每秒 |
+  | **zmq + drain（本次）** | **95.1 / 109.8ms** | **95.2 / 110.2ms** | **10.2 / 10.0 次每秒** |
+  | redis + drain | 12.6 / 14.7ms | 31.1 / 33.2ms | 76.3 / 21.0 次每秒 |
+  | redis + 后台线程 | 10.1 / 105.0ms | 4.1 / 4.8ms | 20.7 / 195.3 次每秒 |
+
+  除了变快，分布也变稳了：95~110ms 正好是一个 adjust tick，改动前那种 400ms 尖峰消失。持仓答的是 10 行真实数据（总资产对得上），不是空壳 —— 按 `get_trade_detail_data` 离开主线程必返回空这条铁律，这证明 drain 确实跑在主线程上。
+
+  **redis 不要跟着设 `False`**。实测 redis 上开 drain 是负优化：交易查询从 4.1ms 掉到 31.1ms、吞吐从 195 掉到 21 次每秒。原因是 drain 每 tick 只轮询一次，请求要等下一个 tick；redis 的阻塞 `brpop` 是请求一落队列就推回来。resolver 对 redis 保持 `bool(configured)` 的原有语义没变，但配置里默认值应当继续是后台线程。
+
+  **同一批实测暴露的三件事，都已单独记录**：zmq 客户端 `send_request` 全程持单 socket 锁，并发拿不到任何吞吐收益（#186，zmq 上 2.4→2.7、10.2→10.2，而 redis 上 20.7→143.3）；README 的 transport 性能表与实测相反，正把用户引向最慢的配置（#187）；纯 zmq / 单文件入口强制 `rpc_background_threads = True`，最需要低延迟的那批部署吃不到本次改动（#188）。
+
+  **未验证**：只在 zmq 和 redis 上量过，mysql 和 shm 没测；只在收盘后量过，盘中 QMT 主线程更忙时的数字可能不同；只覆盖了 `ping`（inline）和 `query_stock_positions`（deferred）两个方法，没有下单路径 —— 本次测量不下单。
+
+
 ### 修复
 
 - **策略名一直就在回调里，读错字段了**（#174，@sumo225270 提供 raw_fields）：#174 此前的结论是「大 QMT 的委托/成交行不带策略名，只能靠下单时记、回调时反查」。那是从一个**正确的观察**得出的**错误结论** —— `m_strStrategyName` 确实不存在（实盘列全部属性：ORDER 120 个、DEAL 47 个，两边都没有），但名字在 `m_strSource`（**报单来源**）里，就是 `passorder` 第 8 个参数 `strategyName` 原样回来。
