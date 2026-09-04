@@ -3,7 +3,7 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/) 和 [语义化版本](https://semver.org/)。
 
 
-## [未发布]
+## [0.3.20] - 2026-09-04
 
 ### 新增
 
@@ -43,7 +43,7 @@
 
   现在**先查进程内的 journal（#156，查询路径本来就在用），Redis 作兜底**。这个顺序是有意的：补全跑在 QMT 的 C++ 回调线程上，本进程下的单在 journal 里已经存着和 Redis 一模一样的字符串，先问 Redis 什么也换不来，却要付一次网络往返 —— Redis 配了连不上时更是每个事件都付满超时。Redis 留作兜底是因为它能认出**别的进程**下的单，那是更少见的情况。
 
-  已验证：全量测试 `1499 passed`（112 文件 = 112 模块），13 条新用例修复前 10 条红（另外 3 条是回归保护）；用终端自己的 `xtquant`（91 个名字）预检通过，`bigqmt_signal_trader_strategy` 能干净导入；两个改动文件 AST 无 3.7+ 语法（QMT 只有 Python 3.6）；只读实盘门禁 10/10。
+  已验证：全量测试 `1499 passed`（112 文件 = 112 模块），13 条新用例修复前 11 条红（另外 2 条是回归保护）；用终端自己的 `xtquant`（91 个名字）预检通过，`bigqmt_signal_trader_strategy` 能干净导入；两个改动文件 AST 无 3.7+ 语法（QMT 只有 Python 3.6）；只读实盘门禁 10/10。
 
   **未验证**：这是服务端改动，要部署 + **重启策略**（`reload_deployment` 刷不了 `bigqmt_signal_trader_strategy.py`，QMT exec 的就是它）。而且**要等开盘有真实成交回调才能实盘确认** —— 收盘后没有委托/成交回调可看，本次只有离线用例。报告人那侧「remark 是否被 QMT 截断导致键对不上」的怀疑仍未验证，等他贴 `raw_fields`。
 
