@@ -1891,6 +1891,25 @@ class BigQmtRpcHandlers:
         results = []
         for index, item in enumerate(orders):
             item = dict(item or {})
+            # No per-item settlement, and not negotiable per item (#181).
+            #
+            # _handle_submit_order defaults wait_settlement to True and parks
+            # the settlement in a SINGLE slot; the service takes that slot once
+            # per request. N orders in one request therefore overwrite each
+            # other and only the last survives -- carrying the batch's own
+            # request/response, so the whole batch reply gets held until that
+            # one order settles or times out, and that one order's diagnostic
+            # ("order not found in system", naming one stock, one price, one
+            # volume) is attached to a reply covering all of them. The
+            # order_sys_id it back-fills is read by nobody: each result dict is
+            # built from the submit result before any settlement runs.
+            #
+            # Nothing is lost by skipping it. The batch answers per item
+            # already, and order_sys_id arrives on the order_callback push the
+            # same way it does for order_stock_async (#50). Honouring an
+            # explicit wait_settlement per item would need a settlement queue
+            # keyed to one reply, which is the "把单槽改成队列" half of #181.
+            item["wait_settlement"] = False
             order_tag = str(item.get("order_remark") or item.get("remark") or item.get("signal_id") or "")
             if not order_tag:
                 results.append({
