@@ -457,7 +457,23 @@ class BigQmtMarketDataProvider:
         if method_name == "get_local_data" and data_dir is not None:
             positional_tail_kwargs["data_dir"] = data_dir
 
+        # fill_data (停牌填充) reaches big QMT too. Its signature has it --
+        #   C.get_market_data_ex(fields, stock_code, period, start_time,
+        #                        end_time, count, dividend_type, fill_data,
+        #                        subscribe)
+        # -- and big_kwargs is the FIRST shape tried, so it succeeded while
+        # silently dropping the argument: a caller asking not to fill suspended
+        # days got them filled anyway, with no error (issue #167, @zxm9999).
+        #
+        # Carried in a shape of its own, tried ahead of the bare one, rather
+        # than added to big_kwargs directly: a terminal whose signature lacks
+        # fill_data would raise TypeError, and _call_first_supported only falls
+        # through on TypeError -- so the bare shape has to stay reachable.
+        big_kwargs_filled = dict(big_kwargs, fill_data=fill_data)
+        positional_tail_filled = dict(positional_tail_kwargs, fill_data=fill_data)
+
         return [
+            (method_name, (), big_kwargs_filled),
             (method_name, (), big_kwargs),
             (method_name, (), mini_kwargs),
             (
@@ -465,6 +481,7 @@ class BigQmtMarketDataProvider:
                 (field_list, stock_list, period, start_time, end_time, count, dividend_type, fill_data),
                 {},
             ),
+            (method_name, (field_list, stock_list), positional_tail_filled),
             (method_name, (field_list, stock_list), positional_tail_kwargs),
             (
                 method_name,

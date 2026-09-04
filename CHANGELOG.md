@@ -5,6 +5,26 @@
 
 ## [未发布]
 
+### 修复
+
+- **`fill_data` 传不到大 QMT，停牌/无数据被静默填成 0 行且关不掉**（issue #167，@zxm9999）：报告人直接指出了断点 —— `_market_data_shapes()` 的 `big_kwargs` 没带 `fill_data`，而它是**第一个被尝试**的 shape，调用成功，参数就被无声丢弃了。
+
+  大 QMT 是接受这个参数的（文档 5.x：`C.get_market_data_ex(fields, stock_code, period, start_time, end_time, count, dividend_type, fill_data, subscribe)`，终端自带 SDK 签名一致）。
+
+  **后果比「参数被忽略」严重**。实盘实测（20260101~20260904，日线，15 只）：
+
+  ```
+  300750.SZ   fill_data=True -> 164 行，其中 163 行 close = 0.0
+              fill_data=False ->   1 行（真实数据）
+  15 只里 9 只行数不同
+  ```
+
+  也就是说：本地没有下载完整历史的代码，过去一律返回一个**结构完好、99% 是 0** 的 164 行 DataFrame，而调用方**没有办法关掉填充**。在这种帧上算收益率/均线/波动率，拿到的全是垃圾，而且不报错。
+
+  修法：`fill_data` 单独放进一个 shape，排在原来那个不带它的 shape **之前**，而不是直接加进 `big_kwargs` —— `_call_first_supported` 只在 `TypeError` 时回落，所以签名里没有这个参数的终端仍然要能落到原来的 shape 上。`get_market_data` / `get_local_data` 同样处理。
+
+  实盘验证：本终端接受该参数（第一个 shape 直接成功，没有回落），且 `True`/`False` 的返回**确有差异**。新增 11 个测试，修复前 9 个失败。
+
 ### 新增
 
 - **`BIGQMT_ACCOUNT_TYPE_MAP`：一个 QMT 进程同时服务股票和期货账号**（PR #135，@fancyfanfan）：网关的 `account_type` 原来是 init 时定死的，单账号部署没问题；一个策略实例服务两个账号时，它必须跟着**请求的 account_id** 走，否则期货账号会被当成 STOCK 查 —— 和 #92 是同一类 bug（信用账号被当 STOCK 查会返回一整行 0 且不报错）。
