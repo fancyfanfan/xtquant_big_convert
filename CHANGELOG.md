@@ -9,7 +9,7 @@
 
 - **ORDER 委托行透出成交金额 `trade_amount`**（#173，@feel-think 请求）：ccxt 适配层（QmtExchange）要 order dict 的 `cost`。ORDER 行原生带 `m_dTradeAmount`，但 `OrderSnapshot` 取了 `price_type` / `traded_price`，唯独没取成交金额 —— 金额此前只在 DEAL 行以 `amount` 透出。
 
-  于是拿一笔委托的 cost 只有两条路，都不好：按 `order_sysid` 聚合 DEAL 行（多一次 RPC），或用 `traded_price × traded_volume` 估算 —— 单笔成交两者相等，分笔成交时成交均价有舍入，会和柜台差几分。
+  于是拿一笔委托的 cost 只有两条路，都不好：按 `order_sysid` 聚合 DEAL 行（多一次 RPC），或者调用方自己拿 `traded_price × traded_volume` 去算。
 
   查询路径（`query_orders`）和推送路径（`normalize_order_event`）**同时**透出，否则走回调的调用方拿不到 cost；客户端 `xtquant_compat._order_from_dict` 同步传递。
 
@@ -17,7 +17,11 @@
 
   **动手前先查了这台终端到底带不带这个字段。** 只读调 `describe_trade_detail_fields`（0.3.19，当日 14 笔委托）：ORDER 行共 120 个属性，`m_dTradeAmount` 在其中；掩码形状显示 13 笔是四到五位数的金额，唯一一笔 `0.0` 正是 `m_nVolumeTraded` 为 0 的未成交委托。所以它不是一个「存在但恒为空」的字段 —— #133 里的 `m_strShareholderID` 就是那个下场（属性表里根本没有）。
 
-  **未验证**：这是服务端改动，需要部署 + 重启策略后才能实盘确认。本次只验证了字段**存在且有真值**，没验证新代码真的把它发到了客户端；分笔成交时柜台金额与估算值的差异只有构造用例，没有真实分笔成交样本；期货（金额 = 均价×数量×合约乘数）和港股通的 `m_dTradeAmountRMB` 未测。
+  **已实盘验证**（0.3.19 部署 + `reload_deployment`，只读查询）：当日 14 笔委托全部带上 `trade_amount`，且与按 `order_sysid` 聚合的 DEAL 金额 **14/14 逐笔相等** —— 这是一个独立来源，验的是这个数**确实是成交金额**，不只是"字段出现了"。客户端对象路径（ccxt 取 `cost` 的那条）同样确认：14 个 order 对象都有 `.trade_amount`，合计 117546.00。
+
+  **有一条 issue 里的前提没能复现，如实记下**：「分笔成交时成交均价有舍入，会和柜台差几分」在这台终端上**不成立**。`m_dTradedPrice` 不是两位小数，它带完整精度 —— 当日唯一一笔分价成交（55.14 / 55.13 两笔）报的是 `55.13666666666666`，所以 `traded_price × traded_volume` 与柜台金额**差值为 0**。取这个字段的理由因此不是「修好了差几分」，而是它是**柜台的原值**：不依赖某台终端的 `m_dTradedPrice` 精度，也不用多发一次 RPC 去聚合 DEAL。别的券商的 QMT 若把均价截成两位，估算才会开始漂。
+
+  **未验证**：期货（金额 = 均价×数量×合约乘数）和港股通的 `m_dTradeAmountRMB` 未测；推送路径（`normalize_order_event` 的 `trade_amount`）只有离线用例，当日收盘后没有新委托回调可看，没有实盘样本。
 
 ### 修复
 

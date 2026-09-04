@@ -5,11 +5,16 @@
 原生带 ``m_dTradeAmount``，但 ``OrderSnapshot`` 取了 ``price_type`` /
 ``traded_price``，唯独没取成交金额 —— 金额此前只在 DEAL 行以 ``amount`` 透出。
 
-于是拿一笔委托的 cost 只有两条路，都不好：
+于是拿一笔委托的 cost 只有两条路，都不好：按 order_sysid 聚合 DEAL 行（多一次
+RPC），或者调用方自己拿 traded_price * traded_volume 去算。
 
-  * 按 order_sysid 聚合 DEAL 行     -> 多一次 RPC
-  * traded_price * traded_volume   -> 单笔成交时相等, 分笔成交时成交均价有
-                                      舍入, 和柜台的精确金额差几分
+**issue 里"分笔成交时成交均价舍入会差几分"这条，在这台终端上没有复现。**
+部署后实盘查了当日 14 笔委托：`trade_amount` 与按 order_sysid 聚合的 DEAL
+金额 14/14 逐笔相等，而 `traded_price * traded_volume` 也一分不差 —— 因为
+`m_dTradedPrice` 不是两位小数，它带完整精度（唯一一笔分价成交 55.14/55.13
+报的是 55.13666666666666）。所以取这个字段的理由不是"修好了差几分"，而是
+它是**柜台的原值**：不依赖某台终端的 m_dTradedPrice 精度，也不用多发一次
+RPC。别的券商的 QMT 要是真把均价截成两位，估算就会开始漂。
 
 **这个终端的 ORDER 行确实带这个字段。** 动手前先用只读的
 ``describe_trade_detail_fields`` 在实盘验过 (0.3.19, 账户当日 14 笔委托):
@@ -84,12 +89,14 @@ class OrderTradeAmountTest(unittest.TestCase):
 
         self.assertEqual(order.trade_amount, 692.0)
 
-    def test_a_partial_fill_reports_the_counter_amount_not_the_estimate(self):
-        """The whole point: 成交均价 rounds, the counter amount does not.
+    def test_the_counter_amount_wins_over_price_times_volume(self):
+        """Read the field; never recompute it from price and volume.
 
-        800 shares filled across two prints, 3.414 average -- QMT rounds
-        m_dTradedPrice to 3.41, so price * volume says 2728.00 while the
-        counter says 2731.20. Estimating loses 3.20 yuan.
+        This terminal reports m_dTradedPrice at full precision, so the two
+        agree here (verified live: 14/14). A terminal that truncates 成交均价
+        to two decimals would not -- 800 shares averaging 3.414 reported as
+        3.41 gives 2728.00 against the counter's 2731.20. This pins that the
+        answer comes off the row either way.
         """
         row = _order_row(m_nVolumeTraded=800, m_dTradedPrice=3.41,
                          m_dTradeAmount=2731.2)
