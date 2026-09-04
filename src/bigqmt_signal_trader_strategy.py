@@ -1674,6 +1674,71 @@ def _exec_event_redis(config):
     return _exec_event_redis_client
 
 
+def _local_identity_strategy_name(account_id, event):
+    """strategy_name from the in-process submit journal, or "".
+
+    The journal (#156) is written by the RPC handlers at submit time and is
+    all a deployment has when redis is absent -- or, the reported case in
+    #174, configured but not reachable, which fails silently.
+    """
+    service = _rpc_service
+    handlers = getattr(service, "handlers", None) if service is not None else None
+    journal = getattr(handlers, "_order_identity_local", None)
+    if not journal:
+        return ""
+    remark = str(event.get("user_order_id") or event.get("remark") or "").strip()
+    if not remark:
+        return ""
+    try:
+        entry = journal.get((str(account_id or ""), remark))
+        if not entry:
+            return ""
+        stamped, name = entry
+        ttl = getattr(handlers, "_ORDER_IDENTITY_LOCAL_TTL_SECONDS", 86400.0)
+        if name and (time.time() - float(stamped)) <= float(ttl):
+            return str(name)
+    except Exception:
+        return ""
+    return ""
+
+
+def _enrich_event_identity(exec_events, config, account_id, event):
+    """Put the strategy name back on an event QMT could not name (#174).
+
+    Big QMT does not carry it on order or deal objects -- 120 and 47
+    attributes on a live terminal, m_strStrategyName in neither -- so what the
+    bridge remembered at submit time is the only way back.
+
+    The in-process journal is consulted FIRST, and deliberately so. This runs
+    on QMT's C++ callback thread, and for an order this process submitted the
+    journal already holds the same string that was written to redis -- so
+    asking redis first would buy nothing and cost a round trip per event. It
+    costs a lot when redis is configured and not reachable: redis-py does not
+    dial until the first command, so every callback would pay the full
+    timeout (#145's shape). That is precisely the deployment #174 was reported
+    from.
+
+    Redis is the fallback rather than the primary because its extra reach --
+    naming an order some OTHER process submitted -- is the rarer case.
+
+    Both branches call this. Enriching only orders is what left
+    on_stock_trade's strategy_name permanently empty.
+    """
+    if str(event.get("strategy_name") or "").strip():
+        return event
+    name = _local_identity_strategy_name(account_id, event)
+    if name:
+        event["strategy_name"] = name
+        return event
+    redis_client = _exec_event_redis(config)
+    if redis_client is not None:
+        try:
+            event = exec_events.enrich_order_identity(redis_client, account_id, event)
+        except Exception:
+            pass
+    return event
+
+
 def _publish_exec_event(kind, obj, context_info=None):
     """Push a normalized order/trade event to Redis for real-time client callbacks."""
     config = _build_config()
@@ -1703,6 +1768,7 @@ def _publish_exec_event(kind, obj, context_info=None):
     try:
         if kind == "trade":
             event = exec_events.normalize_trade_event(obj, account_id)
+            event = _enrich_event_identity(exec_events, config, account_id, event)
             if not event.get("instrument_name"):
                 event["instrument_name"] = _event_instrument_name(
                     context_info, event.get("stock_code"))
@@ -1712,12 +1778,10 @@ def _publish_exec_event(kind, obj, context_info=None):
         else:
             event = exec_events.normalize_order_event(obj, account_id)
             # Identity enrichment reads the remark->identity map that
-            # remember_order_identity wrote, which only exists in Redis. On a
-            # push channel the event goes out un-enriched rather than not at
-            # all; order_sys_id and remark are already on it.
-            redis_client = _exec_event_redis(config)
-            if redis_client is not None:
-                event = exec_events.enrich_order_identity(redis_client, account_id, event)
+            # remember_order_identity wrote. On a push channel the event goes
+            # out un-enriched rather than not at all; order_sys_id and remark
+            # are already on it.
+            event = _enrich_event_identity(exec_events, config, account_id, event)
             if not event.get("instrument_name"):
                 event["instrument_name"] = _event_instrument_name(
                     context_info, event.get("stock_code"))
