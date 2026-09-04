@@ -537,6 +537,16 @@ def normalize_trade_event(trade, account_id=""):
         # order_sys_id 关联。
         "remark": str(_attr(trade, ["m_strRemark", "order_remark", "remark", "user_order_id"], "") or ""),
         "user_order_id": str(_attr(trade, ["m_strRemark", "user_order_id", "order_remark", "remark"], "") or ""),
+        # 成交事件此前**根本没有这个键** (issue #174) -- 不是空字符串, 是不存在,
+        # 所以客户端 item.get("strategy_name") or "" 只可能答 ""。委托事件一直
+        # 有, 成交没有, 于是 on_stock_trade 拿不到策略名。
+        #
+        # 大 QMT 自己不给: 实盘列全部属性, ORDER 行 120 个、DEAL 行 47 个,
+        # m_strStrategyName 两边都没有 (和 #133 的 m_strShareholderID 同一形态)。
+        # 所以这里基本恒为 ""，真正把名字放回去的是发布路径上的身份补全 --
+        # 留着读一遍是因为别家券商的 QMT 可能带。
+        "strategy_name": str(
+            _attr(trade, ["strategyName", "m_strStrategyName", "strategy_name"], "") or ""),
         # 官方 Deal 字段 m_strTradeDate+m_strTradeTime -> 真实成交 Unix 秒。
         # 0 = 未携带, 客户端会退回 created_at_ts。
         "traded_time": date_time_seconds(

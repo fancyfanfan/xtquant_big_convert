@@ -25,6 +25,28 @@
 
 ### 修复
 
+- **成交回调终于带上 `strategy_name`，委托回调不再只靠 Redis**（#174，@sumo225270 报告）：`on_stock_order` / `on_stock_trade` 拿到的策略名恒为空，而下单时传的是非空串；`instrument_name` / `order_remark` 一切正常。查下来是**两个**不同的原因。
+
+  **成交事件根本没有这个键** —— 不是空字符串，是不存在，所以客户端 `item.get("strategy_name") or ""` 只可能答 `""`。而且发布路径上只有委托分支做了身份补全：
+
+  ```python
+  if kind == "trade":
+      event = normalize_trade_event(...)     # 没有补全
+  else:
+      event = normalize_order_event(...)
+      event = enrich_order_identity(...)     # 只有这边有
+  ```
+
+  这条**跟配置无关，任何部署下都是空的**。现在 `normalize_trade_event` 产出这个键，两个分支都走同一个补全。
+
+  **委托那条则是大 QMT 自己不给。** 实盘列了全部属性：ORDER 行 120 个、DEAL 行 47 个，**`m_strStrategyName` 两边都没有**（和 #133 的 `m_strShareholderID` 同一形态）；查询路径实测也是 14 笔委托策略名全空。所以只能靠下单时记、回调时按 remark 反查 —— 而这一步此前**只读 Redis**。zmq 部署上 Redis 是可选件，「配置了 ≠ 连得上」（#145 那个坑）时静默失败，名字就永远补不回来。
+
+  现在**先查进程内的 journal（#156，查询路径本来就在用），Redis 作兜底**。这个顺序是有意的：补全跑在 QMT 的 C++ 回调线程上，本进程下的单在 journal 里已经存着和 Redis 一模一样的字符串，先问 Redis 什么也换不来，却要付一次网络往返 —— Redis 配了连不上时更是每个事件都付满超时。Redis 留作兜底是因为它能认出**别的进程**下的单，那是更少见的情况。
+
+  已验证：全量测试 `1499 passed`（112 文件 = 112 模块），13 条新用例修复前 10 条红（另外 3 条是回归保护）；用终端自己的 `xtquant`（91 个名字）预检通过，`bigqmt_signal_trader_strategy` 能干净导入；两个改动文件 AST 无 3.7+ 语法（QMT 只有 Python 3.6）；只读实盘门禁 10/10。
+
+  **未验证**：这是服务端改动，要部署 + **重启策略**（`reload_deployment` 刷不了 `bigqmt_signal_trader_strategy.py`，QMT exec 的就是它）。而且**要等开盘有真实成交回调才能实盘确认** —— 收盘后没有委托/成交回调可看，本次只有离线用例。报告人那侧「remark 是否被 QMT 截断导致键对不上」的怀疑仍未验证，等他贴 `raw_fields`。
+
 - **交易查询 1500ms → 605ms：回复入队后不再空等 router 的接收超时**（issue #104，@sumo225270）：用两侧墙钟时间戳分解（同机，时钟可直接比）后发现，`get_trade_detail_data` 本身**只要 1 毫秒**，1300ms 全在回复构造完之后。
 
   ```
