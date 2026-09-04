@@ -27,6 +27,12 @@ Deliberately NOT routed here, despite FormulaServer exposing something similar:
 * ``get_divid_factors`` / ``get_risk_free_rate`` — parameter semantics differ
   (range vs single date, index vs timetag). A wrong calendar or dividend factor
   is worse than a slow one.
+  Re-measured 2026-09-04 after someone (me) tried to route it anyway, on the
+  grounds that it is 40x faster and raises nothing: asked for 000001.SZ on
+  20260612 and on 20251015, FormulaServer returned the SAME record both
+  times -- ``{673113600000: [0.3, 0.4, ...]}``, a 1991 timestamp -- while the
+  bridge correctly answered 0.36 and 0.236 for those two ex-dividend days.
+  Speed and a clean return prove nothing about the answer; check the value.
 * Adjusted bars — see :func:`_market_data_params`; ``dividendType`` appears to
   be ignored by the server, so only unadjusted requests are routed.
 
