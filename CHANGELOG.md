@@ -26,6 +26,15 @@
 
   **未验证**：只在 zmq 和 redis 上量过，mysql 和 shm 没测；只在收盘后量过，盘中 QMT 主线程更忙时的数字可能不同；只覆盖了 `ping`（inline）和 `query_stock_positions`（deferred）两个方法，没有下单路径 —— 本次测量不下单。
 
+- **纯 zmq / 单文件部署不再被入口强制开后台线程**（#188）：#183 让 zmq/mysql 可以用显式 `rpc_background_threads: False` 换到 adjust drain，但 `BIGQMT_ZMQ_DRYRUN.py` 设 `BIGQMT_FORCE_TRANSPORT = "zmq"` 之后，入口无条件把这个键赋成 `True` —— **最想要低延迟的那批部署恰好是拿不到的那批**，而且用户在自己配置里写的 `False` 被静默忽略。改成 `setdefault`：没写这个键仍然沿用历史默认 `True`，写了就听用户的。单文件构建器同样处理，它那条 `background_threads=True` 的横幅也改成报告实际用到的值 —— 一条永远说 True 的日志比没有日志更坏，那是「drain 怎么没生效」时第一个会去看的地方。
+
+  实盘验不了这条（要换成纯 zmq 入口再重启策略），所以按仓库对入口文件一贯的做法做源码级钉子；「显式 False 能一路传到 resolver」那一半由 `test_transport_selection.py` 覆盖。
+
+### 文档
+
+- **README 与 docs 的 transport 性能表是反的，已按实测重写**（#187）：此前写着 zmq「同机低延迟 p50~0.7ms」、redis 13ms，还有三处叫用户切 zmq 时「必须」设 `rpc_background_threads: True`。实测 **redis 比 zmq 快 8~60 倍**（ping 10ms vs 95ms，交易查询 4ms vs 95ms），那个 0.7ms 是撞上 adjust 空窗的最好情况而不是 p50，redis 的 13ms 反倒一直是准的。这不只是文档不准 —— 它把追求低延迟的用户直接引到最慢的配置上，而且没有任何反馈能让他们发现选错了；本仓库自己的实盘部署就一直跑在 zmq 上。
+
+  README 的传输表、FormulaServer 对比表、基准表、配置注释、排查指引，以及 `docs/RPC_TRANSPORTS.md` 的传输表和实测段全部更新，并注明「0.3.21 之前这张表是反的」。三处「必须设 True」改成推荐 `False`。顺带记上 zmq 客户端并发无效（#186）—— 只有 redis 上多线程能提升吞吐。
 
 ### 修复
 
@@ -89,7 +98,6 @@
   批量处理器现在对每一项显式置 `wait_settlement=False`。不损失什么：批量应答本来就是逐项的（每项带 `index` / `order_sys_id` / `user_order_id`），委托号照样从 `order_callback` 推送学得到，和 `order_stock_async` 一样（#50）。要真按项支持 `wait_settlement`，得把单槽改成挂在一次应答上的结算队列，那是 #181 的另一半。
 
   **未验证**：这是服务端改动，要部署 + 重启策略才生效，本任务不部署也不下单，所以实盘只证到桥接服务健康（只读门禁 10 项全过），证不到「真发一批委托时应答立刻回来」。离线侧四条用例覆盖：批量不留结算、应答不被扣住、单笔诊断不外溢，以及**单笔 `order_stock` 仍然照常等结算**（负面对照，#44/#152 的机制没被这次改动碰到）。
-
 
 ## [0.3.20] - 2026-09-04
 

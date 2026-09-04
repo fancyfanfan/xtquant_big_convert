@@ -522,14 +522,23 @@ xt_trader.reload_status()            # -> {'ok': True, 'modules_purged': 28,
 
 ### 可插拔传输层
 
-| 传输 | 同机 p50 | 跨机 | 适用场景 |
-|------|---------|------|---------|
-| **redis**（默认）| ~13ms | ✅ | 生产默认，稳定 |
-| **zmq** | ~0.7ms* | ✅ | 同机低延迟 |
-| **mysql** | ~105ms | ✅ | 兼容兜底 |
-| **shm** | — | ❌ | 接口预留（未实现）|
+实测 p50（实盘终端，收盘后，`schedule_adjust_interval: "100nMilliSecond"`，
+每格重启策略后现测。`ping` 走 inline，`query_stock_positions` 走 deferred——
+必须回主线程，是交易查询的真实代价）：
 
-*zmq fast-path；约 30% 请求会撞 QMT 的 GIL 调度尖峰（~500ms）。
+| 传输 | ping p50 | 交易查询 p50 | 串行吞吐 | 跨机 | 适用场景 |
+|------|---------|------------|---------|------|---------|
+| **redis**（默认）| **10ms** | **4ms** | **20 / 195 次每秒** | ✅ | 生产默认，也是最快的 |
+| **zmq** + drain | 95ms | 95ms | 10 / 10 次每秒 | ✅ | 无 redis 时的同机方案 |
+| **zmq** + 后台线程 | 405ms | 607ms | 2.4 / 1.7 次每秒 | ✅ | 旧默认，不推荐 |
+| **mysql** | ~105ms | — | — | ✅ | 兼容兜底 |
+| **shm** | — | — | — | ❌ | 接口预留（未实现）|
+
+> **这张表在 0.3.21 之前是反的**，写着 zmq「同机低延迟 p50~0.7ms」、redis 13ms。
+> 那个 0.7ms 是撞上 adjust 空窗的最好情况，不是 p50；redis 的 13ms 一直是准的。
+> 实测 **redis 比 zmq 快 8~60 倍**，而且只有 redis 上多线程并发能提升吞吐——
+> zmq 客户端整个请求周期持单 socket 锁，并发拿不到任何收益（#186）。
+> `transport` 没有特别理由就别改。
 
 ### FormulaServer 直连快速路径（只读行情，默认开启）
 
@@ -542,8 +551,8 @@ xt_trader.reload_status()            # -> {'ok': True, 'modules_purged': 28,
 
 | 对比 | p50 |
 |------|-----|
-| redis RPC | ~13ms |
-| zmq RPC | ~0.7ms（30% 撞 500ms GIL 尖峰）|
+| redis RPC | ~10ms |
+| zmq RPC（drain）| ~95ms |
 | **FormulaServer 直连** | **0.07ms**（无 GIL 竞争）|
 
 直连覆盖 10 个方法：`get_instrument` / `get_instrument_detail` / `get_instrumentdetail` /
@@ -1031,8 +1040,9 @@ BIGQMT_REDIS_CONFIG = {
 
     # === 传输选择（默认 redis，生产推荐）===
     # "transport": "redis",              # 不写就是 redis
-    # 切 zmq（同机低延迟，实测 p50~0.3ms）：装了 pyzmq 后只需这一行。
-    #   非 redis 传输会自动开 background_threads；端口按账号派生 127.0.0.1:1556x。
+    # 切 zmq：装了 pyzmq 后只需这一行。端口按账号派生 127.0.0.1:1556x。
+    #   注意 zmq 实测比 redis 慢（ping 95ms vs 10ms，交易查询 95ms vs 4ms），
+    #   它的用途是「这台机器没有 redis」，不是低延迟。
     # "transport": "zmq",
     # 切 mysql（兼容兜底）：需装 pymysql+DBUtils，同样自动开 background_threads。
     # "transport": "mysql",
@@ -1048,7 +1058,10 @@ BIGQMT_REDIS_CONFIG = {
 }
 ```
 
-> **重要**：切到 zmq 或 mysql 时，必须同时设 `"rpc_background_threads": True`（这两种传输用自己的后台线程，不走 QMT 回调 drain）。
+> **`rpc_background_threads` 保持 `False`**，包括 zmq 和 mysql。0.3.21 起这两种传输
+> 也支持 adjust 线程 drain（#183），实测把 zmq 的 ping 从 405ms 降到 95ms、交易查询从
+> 607ms 降到 95ms。0.3.21 之前它们必须设 `True`，现在设 `True` 等于主动放弃这段提速。
+> 不写这个键则沿用历史默认（开后台线程）。
 
 ### 第 3 步：在 QMT 里运行策略
 
@@ -1176,11 +1189,11 @@ BIGQMT_REDIS_CONFIG = {
 {"transport": "redis"}  # 或省略 transport 字段
 ```
 
-**ZMQ**（同机低延迟，需 pyzmq）：
+**ZMQ**（无 redis 时的同机方案，需 pyzmq）：
 ```python
 {
     "transport": "zmq",
-    "rpc_background_threads": True,        # 必须！
+    "rpc_background_threads": False,       # 0.3.21 起走 adjust drain，快 4~6 倍（#183）
     "zmq": {
         "host": "127.0.0.1",              # 默认端口从 account_id 派生
         # "port": 5560,                   # 可显式指定
@@ -1193,7 +1206,7 @@ BIGQMT_REDIS_CONFIG = {
 ```python
 {
     "transport": "mysql",
-    "rpc_background_threads": True,        # 必须！
+    "rpc_background_threads": False,       # 0.3.21 起走 adjust drain，快 4~6 倍（#183）
     "mysql": {
         "driver": "pymysql",
         "host": "192.168.1.100", "port": 3306,
@@ -1221,15 +1234,18 @@ BIGQMT_REDIS_CONFIG = {
 
 三种传输全部实测，端到端连接真实 QMT 进程，n=15/方法：
 
-| 传输 | ping p50 | get_full_tick p50 | 成功率 | 尖峰来源 |
-|------|---------|------------------|--------|---------|
-| **Redis** | 13ms | 15ms | 100% | 偶发 245ms（网络抖动）|
-| **ZMQ** | 0.7ms* | 0.7ms* | 100% | 30% 撞 500ms（QMT adjust GIL）|
-| **MySQL** | 104ms | 110ms | 100% | 轮询开销 |
+| 传输 | ping p50 | ping p90 | 交易查询 p50 | 串行吞吐（ping / 交易查询）|
+|------|---------|---------|------------|------------------------|
+| **Redis** | **10ms** | 105ms | **4ms** | **20 / 195 次每秒** |
+| **ZMQ**（drain，#183）| 95ms | 110ms | 95ms | 10 / 10 次每秒 |
+| **ZMQ**（后台线程，0.3.21 前的默认）| 405ms | 408ms | 607ms | 2.4 / 1.7 次每秒 |
+| **MySQL** | ~104ms | — | — | — |
 
-*ZMQ fast-path（避开 GIL 尖峰的请求）；overall p90 ~498ms。
-
-**生产推荐 Redis**：稳定、跨机、无 GIL 问题、QMT 端零额外依赖。ZMQ 理论最快但受 QMT 主线程 GIL 调度影响。MySQL 仅作兜底。
+**生产推荐 Redis**，而且它就是实测最快的那个 —— 早期版本说「ZMQ 理论最快」是错的。
+ZMQ 的 drain 模式被钉在一个 adjust tick（95ms ≈ 100ms tick），因为它每 tick 只轮询
+一次；Redis 的阻塞 `brpop` 是请求一落队列就推回来，不等 tick。并发也只有 Redis 有
+用：ZMQ 客户端整个请求周期持单 socket 锁（#186），4 并发和串行一样快。
+ZMQ 的用途是「这台机器没有 redis」。MySQL 仅作兜底。
 
 复现基准：
 ```powershell
@@ -1468,7 +1484,7 @@ python qmt-trader/scripts/qmt.py snapshot --table
 
 1. QMT 端 RPC 服务已启动（同机 ZMQ 运行 `BIGQMT_ZMQ_DRYRUN.py`，其它 transport 运行 `BIGQMT_REDIS_DRYRUN.py`，输出面板/日志看到启动诊断 OK）；
 2. 客户端配置就绪——环境变量（`BIGQMT_ACCOUNT_ID` / `BIGQMT_REDIS_HOST` / `BIGQMT_REDIS_PORT` / `BIGQMT_REDIS_DB` / `BIGQMT_REDIS_PASSWORD`）或配置文件；
-3. 先 `ping` 确认连通：redis 约 13ms / zmq 约 0.7ms 为正常，超时说明 transport 或配置不匹配。
+3. 先 `ping` 确认连通：redis 约 10ms / zmq 约 95ms 为正常，超时说明 transport 或配置不匹配。
 
 ### 一分钟上手
 

@@ -543,12 +543,14 @@ try:
     # Force zmq transport (this is the no-redis version).
     BIGQMT_REDIS_CONFIG = dict(BIGQMT_REDIS_CONFIG or {})
     BIGQMT_REDIS_CONFIG["transport"] = "zmq"
-    BIGQMT_REDIS_CONFIG["rpc_background_threads"] = True
+    # setdefault: an explicit False is the #183 drain opt-in, worth 4-6x lower
+    # latency on zmq, and assignment overwrote it (#188).
+    BIGQMT_REDIS_CONFIG.setdefault("rpc_background_threads", True)
     # Nothing here can reach redis, so say so instead of letting the runtime
     # fill in 127.0.0.1:6379 from its defaults (issues #145 / #147).
     BIGQMT_REDIS_CONFIG["redis_enabled"] = False
-    print("[bigqmt_shell] no-redis mode: transport=zmq background_threads=True "
-          "redis_enabled=False")
+    print("[bigqmt_shell] no-redis mode: transport=zmq background_threads=%s "
+          "redis_enabled=False" % BIGQMT_REDIS_CONFIG["rpc_background_threads"])
     _runtime.configure_runtime_redis(BIGQMT_REDIS_CONFIG)
 except Exception as redis_config_error:
     print("[bigqmt_shell] local redis config load failed: %s" % redis_config_error)

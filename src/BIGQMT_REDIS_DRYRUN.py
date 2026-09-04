@@ -295,7 +295,16 @@ try:
         BIGQMT_REDIS_CONFIG = dict(BIGQMT_REDIS_CONFIG or {})
         BIGQMT_REDIS_CONFIG["transport"] = str(forced_transport)
         if str(forced_transport).lower() == "zmq":
-            BIGQMT_REDIS_CONFIG["rpc_background_threads"] = True
+            # setdefault, not assignment: an explicit False in the local config
+            # is the #183 drain opt-in, and overwriting it kept the pure-zmq
+            # entries -- the deployments that most want low latency -- on the
+            # slow path (#188). Measured on the live terminal, drain takes zmq
+            # from ping 404ms / positions 607ms to 95ms for both.
+            #
+            # Only the historical default is filled in here. A transport that
+            # cannot drain still gets its receiver thread: _resolve_background_
+            # threads forces True for anything outside zmq/mysql/redis.
+            BIGQMT_REDIS_CONFIG.setdefault("rpc_background_threads", True)
             BIGQMT_REDIS_CONFIG["download_jobs_enabled"] = False
             # Execution events have a native ZMQ PUB path.  Preserve the
             # configured/default switch so MiniQMT-compatible order and trade
