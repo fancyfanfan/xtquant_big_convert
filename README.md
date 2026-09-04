@@ -1281,6 +1281,37 @@ python test_all_apis.py
 
 系统自带**文件日志**——所有报错/异常同时写 QMT 输出面板和本地日志文件，重启/崩溃后也能回溯。
 
+### 下单报错对照（先查这张表）
+
+下单失败有四种完全不同的原因，**报错长得不一样，别混**：
+
+| 你看到的报错 | 原因 | 怎么修 |
+|---|---|---|
+| `ValueError: rpc method is not allowed: order_stock` | **`rpc_allow_order_methods` 是 `False`**（默认值），下单方法根本没进服务端白名单 | 服务端配置改 `True`，**重启策略** |
+| `RuntimeError: passorder is not available in Big QMT runtime` | QMT 没注入 API 全局 —— 这个文件被当成**普通脚本**执行了 | 加到**模型交易**里运行，别在策略编辑器窗口点运行；检查没勾「独立 python 进程」 |
+| `server_error: passorder submitted but order not found in system` | 委托没进系统。最常见是 QMT 模型交易的**运行模式是「模拟」**（默认值）—— `passorder` 内部撮合，永远到不了券商 | 运行模式改**实盘** |
+| `order_gateway is not configured` | 策略 `init` 挂了 | 看启动日志找真正的异常 |
+
+**最常见的是第一条。** 一句话确认：
+
+```python
+xt_trader.client.call("ping")["allow_order_methods"]
+# False -> 就是它
+```
+
+服务端 `bigqmt_signal_trader_local_config.py`：
+
+```python
+BIGQMT_REDIS_CONFIG = {
+    # ...
+    "rpc_allow_order_methods": True,     # 默认 False
+}
+```
+
+> 改完**必须重启策略**，`reload_deployment()` 刷不了顶层的 `bigqmt_signal_trader_strategy.py`。
+
+> 这个默认值是**有意保守**的（见下文「安全默认值」）：任何能连上这条通道的程序都能下单，所以要显式打开。
+
 ### 日志位置
 
 | 环境 | 日志文件 |
