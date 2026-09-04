@@ -255,6 +255,14 @@ def _trade_to_dict(t):
     for attr in [
         "account_id", "stock_code", "order_type", "order_sysid", "order_id",
         "trade_id", "traded_volume", "traded_price", "traded_at", "order_remark",
+        # 成交行的策略名 (#174)。服务端一直在发它 —— 实盘只读核对过成交
+        # 应答带 strategy_name 这个键, 查询路径的 _attribute_to_strategies
+        # 还会把本桥下的单补回名字 —— 只有这里没列, 委托的 _order_to_dict
+        # 列了。#174 让人「回调拿不到就用查询兜一下」, 而照做的人用本 CLI
+        # 查成交, 看到的却是查询路径也没有策略名。
+        # 同 trade_amount: 取不到给 None 而不是 "", 「服务端没发」和
+        # 「这笔单没有策略名(手工单)」是两回事。
+        "strategy_name",
     ]:
         d[attr] = getattr(t, attr, None)
     d["order_type_name"] = {23: "BUY", 24: "SELL"}.get(d.get("order_type"), str(d.get("order_type", "")))
