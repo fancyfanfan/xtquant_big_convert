@@ -3939,9 +3939,17 @@ class BigQmtXtTrader:
             item = {name: value for name, value in fields.items()
                     if name != "account" and value is not None}
             item["wait_settlement"] = False
+            # A unique per-item signal_id, for the same reason the single path
+            # invents one (#190). It also makes the no-remark case safe against
+            # a server that predates the idempotent flag: the batch tag falls
+            # back to signal_id, so distinct ids cannot collide into a dedup.
+            # An explicit order_remark still wins, and still reaches QMT as the
+            # user wrote it.
+            item.setdefault("signal_id", "bqrpc:%s" % uuid.uuid4().hex)
             payload.append(item)
         try:
-            results = self.order_stock_batch(account_id, payload) or []
+            results = self.order_stock_batch(account_id, payload,
+                                             idempotent=False) or []
         except Exception:
             log.exception("async batch of %d failed; submitting one at a time",
                           len(group))
@@ -4164,7 +4172,15 @@ class BigQmtXtTrader:
                 time.sleep(0.005)
         return True
 
-    def order_stock_batch(self, account, orders, batch_id=""):
+    def order_stock_batch(self, account, orders, batch_id="", idempotent=True):
+        """Submit N orders in one RPC.
+
+        ``idempotent`` (default True, unchanged) is the batch contract: every
+        item needs a tag, and a tag already submitted answers success without
+        placing again, so a retried batch cannot double-order. Pass False for
+        callers that never agreed to that -- order_stock_async routes its
+        backlog through here (#181) and lost orders to it (#190).
+        """
         account_id = _account_id(account, self.client.account_id)
         payload = []
         for item in orders or []:
@@ -4172,6 +4188,8 @@ class BigQmtXtTrader:
             entry.setdefault("account_id", account_id)
             payload.append(entry)
         params = {"account_id": account_id, "orders": payload}
+        if not idempotent:
+            params["idempotent"] = False
         if batch_id:
             params["batch_id"] = str(batch_id)
         return self.client.call(
