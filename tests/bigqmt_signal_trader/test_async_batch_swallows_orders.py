@@ -193,6 +193,66 @@ class BatchContractUnchangedTest(unittest.TestCase):
         self.assertFalse(results[0]["idempotent"])
 
 
+class TightLoopEndToEndTest(unittest.TestCase):
+    """The reporter's scenario verbatim, offline: a tight order_stock_async
+    loop with NO remark, driven through the real worker/batcher/dispatcher and
+    answered by the real server handler (dry-run gateway standing in for
+    passorder).
+
+    Live on the fixed build (2026-09-04, after close, 20 limit-down buys):
+    20/20 orders reached the submit path and were recorded; before the fix the
+    same loop placed 0 (ORDER_TAG_REQUIRED swallowed the batch). Everything in
+    between -- queueing, batch selection, the idempotent=False opt-out, unique
+    per-item tagging, per-seq callbacks -- is what this pins.
+    """
+
+    def test_tight_loop_without_remarks_places_and_answers_every_order(self):
+        from bigqmt_signal_trader.xtquant_compat import (
+            BigQmtXtTrader, XtQuantTraderCallback)
+
+        gateway = DryRunOrderGateway()
+        handlers = _handlers(gateway)
+
+        class Recorder(XtQuantTraderCallback):
+            def __init__(self):
+                self.responses = []
+                self.errors = []
+
+            def on_order_stock_async_response(self, r):
+                self.responses.append(r)
+
+            def on_order_error(self, e):
+                self.errors.append(e)
+
+        trader = BigQmtXtTrader(account_id="acct")
+        recorder = Recorder()
+        trader.register_callback(recorder)
+
+        # The batch seam wired to the REAL server handler, the way the fixed
+        # bridge answers it.
+        def real_batch(account, orders, batch_id="", idempotent=True):
+            params = {"account_id": "acct", "orders": list(orders)}
+            params["idempotent"] = idempotent
+            return handlers._handle_submit_orders_batch(params)
+
+        trader.order_stock_batch = real_batch
+        n = 20
+        seqs = [trader.order_stock_async("acct", "601398.SH", 23, 100, 11, 7.32)
+                for _ in range(n)]
+
+        self.assertTrue(trader.wait_async_orders(timeout=5.0))
+        trader.stop()
+
+        self.assertEqual(len(gateway.submitted), n,
+                         "placed %d of %d orders" % (len(gateway.submitted), n))
+        self.assertEqual([e.error_msg for e in recorder.errors], [])
+        self.assertEqual(len(recorder.responses), n)
+        self.assertEqual([r.seq for r in recorder.responses], seqs)
+        order_ids = [str(r.order_id) for r in recorder.responses]
+        self.assertEqual(len(set(order_ids)), n,
+                         "order ids must not collapse: %r" % order_ids)
+
+
 class AsyncPathSendsTheOptOutTest(unittest.TestCase):
     """The client half: the async backlog must actually opt out."""
 
