@@ -3,6 +3,53 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/) 和 [语义化版本](https://semver.org/)。
 
 
+## [0.3.19] - 2026-09-04
+
+### 新增
+
+- **多账号 RPC 服务：一个策略实例、两条 channel，同时服务两个账号**（PR #171，@fancyfanfan）：0.3.18 的 `BIGQMT_ACCOUNT_TYPE_MAP`（PR #135）解决的是「读」—— 查询按请求的 `account_id` 解析 `account_type`。这一条解决「写 + 架构」：
+
+  ```
+  MAP 有多条时：
+    primary service   → adjust 主线程（background_threads=False）
+    secondary service → 后台线程收，交易类请求 defer 到主线程 drain
+    两者共享同一个 BigQmtRpcHandlers
+    SecondaryHandlersProxy 把 secondary 的 account_id 注入 params
+  ```
+
+  **主线程那条硬约束没有被破坏。** `submit_order` / `submit_orders_batch` / `cancel_order` 不在 `READ_METHODS` 里，所以哪怕 secondary 的 `listener_methods=("*",)`，`_expand_listener_methods` 展开后也不包含它们；交易类查询（`LISTENER_DEFERRED_METHODS`）则在展开时被显式减掉。两类都落进 secondary 自己的 `pending` 队列，由 `MultiAccountRpcServiceManager.drain_pending()` 在 adjust 主线程统一执行 —— `get_trade_detail_data` 仍然只在主线程被调用。
+
+  **MAP 为空或只有一条时零行为变化**：`build_multi_account_rpc_service` 直接返回原来那个 service，不做任何包装。
+
+### 修复
+
+- **撤单不再永远用网关自己的账号**（#168，随 PR #171 一起）：`cancel()` 原来两个值都取自网关自身 ——
+
+  ```python
+  account_type = self._resolve_account_type(self.account_id)   # 网关的，不是这笔委托的
+  ok = cancel_func(order_ref.order_sys_id, self.account_id, account_type, self.context_info)
+  ```
+
+  而 `_handle_cancel_order` 第一件事就是 `account_id = self._request_account_id(params)` —— **算出来了，但没往下传**。双账号部署里撤一笔期货委托，会用股票账号的 id 和类型发出去；好一点是撤不掉，差一点是撤到同名的另一笔。又因为 `cancel` 的原生返回值**两个方向都不可信**（#148 返回 false 其实撤成了，#151 返回 true 而委托根本不存在），这个错误未必当场暴露。
+
+  现在 `cancel(order_ref, account_id=None)`，`aid = account_id or self.account_id` —— 单账号传 `None` 时与原来完全等价。
+
+- **部署脚本拒绝把包拷进它自己里面**（PR #169，@karlthas007）：step 2 用 `import bigqmt_signal_trader_strategy` 解析源目录。从 QMT 的 python 目录本身启动脚本时，这个 import 命中的是**已经部署好的文件**，于是 `src == dst`，`Copy-Item` 把包拷进自己：
+
+  ```
+  python\bigqmt_signal_trader\bigqmt_signal_trader\
+  ```
+
+  更麻烦的是外层那份旧包还在原地，而顶层文件被更新了 —— 混出一棵版本不一致的树，直到 RPC 启动才以 `__init__() got an unexpected keyword argument 'default_strategy_name'` 的形式炸出来。现在这种情况直接抛错，并告诉你换个目录跑。
+
+  同一个 PR 还给两处 github 下载失败（redis zip、miniconda 安装包）的报错补上了 `-Proxy` 提示 —— 很多服务器环境直连不到 github.com，而 `-Proxy` 参数本来就有，只是报错里没说。
+
+### 已知限制
+
+- **双账号路由本身没有实盘验证。** 本仓库只有一个账号，且验证终端的 config 里没有 `BIGQMT_ACCOUNT_TYPE_MAP`，因此 `build_multi_account_rpc_service` 走的是「直接返回 primary」那条分支 —— 多账号代码路径**一次都没有被执行过**。dual-channel 收发、`SecondaryHandlersProxy` 的 account_id 注入、secondary 的 `pending` 队列被主线程 drain，这三件事目前只有代码走查和单测支撑。需要 STOCK + FUTURE 同终端的生产环境作证。
+- **撤单按 account_id 路由同理**，只验证了单账号回落路径（`account_id=None` → `self.account_id`）与原行为一致。「期货委托用期货账号撤掉」这半需要双账号环境。
+- 本版发布时实盘终端跑的是 0.3.18；0.3.19 的服务端改动**尚未部署验证**。
+
 ## [0.3.18] - 2026-09-04
 
 ### 新增
