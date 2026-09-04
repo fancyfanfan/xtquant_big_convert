@@ -150,7 +150,7 @@ class FilteredQueryNamesRowsTest(unittest.TestCase):
         gateway._rows = rows
         gateway._require_query_func = lambda: (
             lambda account_id, account_type, kind, strategy_name: rows)
-        gateway._account_type_code = lambda: 2
+        gateway._account_type_code = lambda account_id=None: 2
         gateway.account_type = "STOCK"
         gateway.context_info = None
         return gateway

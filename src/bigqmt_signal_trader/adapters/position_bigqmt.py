@@ -1,5 +1,6 @@
 """Big QMT position and asset adapters."""
 
+from ..account_type_map import account_type_for
 from ..code_utils import normalize_stock_code
 from ..models import AssetSnapshot, PositionSnapshot, PositionStatisticsSnapshot
 
@@ -144,6 +145,10 @@ class BigQmtPositionProvider:
         self.get_trade_detail_data = get_trade_detail_data_func
         self.account_type = account_type
 
+    def _resolve_account_type(self, account_id):
+        """Per-request account_type: map lookup if configured, else default."""
+        return account_type_for(account_id, self.account_type)
+
     def _require_query_func(self):
         if self.get_trade_detail_data is None:
             raise RuntimeError("get_trade_detail_data is not available in Big QMT runtime")
@@ -154,7 +159,7 @@ class BigQmtPositionProvider:
         # QMT's get_trade_detail_data can raise on POSITION queries in some
         # states (e.g. context not bound). Degrade to empty like get_asset does.
         try:
-            rows = query(account_id, self.account_type, "POSITION") or []
+            rows = query(account_id, self._resolve_account_type(account_id), "POSITION") or []
         except Exception:
             return {}
         positions = {}
@@ -186,7 +191,7 @@ class BigQmtPositionProvider:
     def get_position_statistics(self, account_id):
         query = self._require_query_func()
         try:
-            rows = query(account_id, self.account_type, "POSITION_STATISTICS") or []
+            rows = query(account_id, self._resolve_account_type(account_id), "POSITION_STATISTICS") or []
         except Exception:
             return []
         stats = []
@@ -263,7 +268,7 @@ class BigQmtPositionProvider:
         rows = []
         for detail_type in ("ACCOUNT", "ASSET"):
             try:
-                rows = query(account_id, self.account_type, detail_type) or []
+                rows = query(account_id, self._resolve_account_type(account_id), detail_type) or []
                 if rows:
                     break
             except Exception:

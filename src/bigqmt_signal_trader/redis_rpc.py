@@ -593,11 +593,12 @@ class BigQmtRpcHandlers:
             "allow_order_methods": bool(self.allow_order_methods),
             "rpc_revision": RPC_REVISION,
             "version": _deployed_version(),
-            "account_type": self._reported_account_type(),
+            "account_type": self._reported_account_type(
+                params.get("account_id") or self.account_id),
             "server_time": _dt.datetime.now(),
         }
 
-    def _reported_account_type(self):
+    def _reported_account_type(self, account_id=None):
         """What this deployment will actually trade as.
 
         The client's StockAccount(..., "CREDIT") never reaches the server --
@@ -605,10 +606,16 @@ class BigQmtRpcHandlers:
         caller declaring CREDIT against a STOCK deployment has no way to see
         the mismatch. It shows up as an all-zero credit asset row instead
         (issue #92). Empty when there is no gateway to ask.
+
+        When account_id is given and the gateway supports per-request
+        resolution, the map-aware type is returned (same #92 class of bug
+        for multi-account deployments where a FUTURE account sees "STOCK").
         """
         gateway = self.order_gateway
         if gateway is None:
             return ""
+        if account_id is not None and hasattr(gateway, "_resolve_account_type"):
+            return str(gateway._resolve_account_type(account_id) or "").strip().upper()
         return str(getattr(gateway, "account_type", "") or "").strip().upper()
 
     def _handle_get_deployment_info(self, params):
@@ -1238,9 +1245,29 @@ class BigQmtRpcHandlers:
         # Some brokers hand back rows even here; normalise rather than drop.
         return _normalize_detail_rows(data)
 
-    def _configured_account_type(self):
+    def _configured_account_type(self, account_id=None):
+        """The account type this deployment will trade as, per-request aware.
+
+        When the gateway supports per-request account_type resolution (i.e.
+        has ``_resolve_account_type`` from BIGQMT_ACCOUNT_TYPE_MAP), this
+        returns the map-aware type for the given account_id.  When no map
+        is configured, returns the gateway's own ``account_type`` unchanged.
+
+        The *account_id* parameter is explicit (not read from instance state)
+        because zmq deployments have a background listener thread calling
+        market-data methods concurrently with the adjust thread calling trade
+        methods -- storing params on ``self`` would race (issue #43, #164).
+        """
+        gateway = self.order_gateway
+        if gateway is not None and hasattr(gateway, "_resolve_account_type"):
+            try:
+                aid = account_id or self.account_id or ""
+                if aid:
+                    return str(gateway._resolve_account_type(aid)).strip().upper()
+            except Exception:
+                pass
         return str(
-            getattr(self.order_gateway, "account_type", "CREDIT") or "CREDIT"
+            getattr(gateway, "account_type", "CREDIT") or "CREDIT"
         ).strip().upper()
 
     def _query_trade_detail(self, params, detail_type, strategy_name=""):
@@ -1254,8 +1281,11 @@ class BigQmtRpcHandlers:
         gateway = self.order_gateway
         if gateway is None or gateway.get_trade_detail_data is None:
             return []
+        account_type = (gateway._resolve_account_type(account_id)
+                        if hasattr(gateway, "_resolve_account_type")
+                        else getattr(gateway, "account_type", "STOCK"))
         try:
-            rows = gateway.get_trade_detail_data(account_id, gateway.account_type, detail_type, strategy_name)
+            rows = gateway.get_trade_detail_data(account_id, account_type, detail_type, strategy_name)
             return _normalize_detail_rows(rows)
         except Exception:
             return []
@@ -1277,7 +1307,7 @@ class BigQmtRpcHandlers:
         return self._call_qmt_global(
             "get_unclosed_compacts",
             self._request_account_id(params),
-            self._configured_account_type(),
+            self._configured_account_type(self._request_account_id(params)),
         )
 
     def _handle_query_credit_subjects(self, params):
@@ -1357,14 +1387,14 @@ class BigQmtRpcHandlers:
         return self._call_qmt_global(
             "get_unclosed_compacts",
             self._request_account_id(params),
-            self._configured_account_type(),
+            self._configured_account_type(self._request_account_id(params)),
         )
 
     def _handle_get_closed_compacts(self, params):
         return self._call_qmt_global(
             "get_closed_compacts",
             self._request_account_id(params),
-            self._configured_account_type(),
+            self._configured_account_type(self._request_account_id(params)),
         )
 
     def _handle_get_debt_contract(self, params):
