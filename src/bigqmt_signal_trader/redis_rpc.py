@@ -2606,15 +2606,6 @@ class RedisPubSubRpcService:
             _t1 = time.perf_counter() if method == "ping" else 0.0
             response["data"] = to_jsonable(result)
             response["ok"] = True
-            if method == "ping":
-                try:
-                    from .logging_setup import get_logger
-                    get_logger("rpc").info(
-                        "ping breakdown handle=%.1fms jsonable=%.1fms",
-                        (_t1 - _t0) * 1000.0,
-                        (time.perf_counter() - _t1) * 1000.0)
-                except Exception:
-                    pass
             # Surface server-side diagnostics when the handler recorded one.
             server_error = getattr(self.handlers, "_last_server_error", None)
             if server_error:
@@ -2634,6 +2625,7 @@ class RedisPubSubRpcService:
         except Exception as exc:
             response["error"] = "%s: %s" % (exc.__class__.__name__, exc)
         response["_t_reply"] = time.time()
+        _t_pub0 = time.perf_counter() if method == "ping" else 0.0
         try:
             self._publish_response(request, response)
         except Exception:
@@ -2646,6 +2638,20 @@ class RedisPubSubRpcService:
                 get_logger("rpc").error(
                     "publish response failed method=%s:\n%s", method, _tb.format_exc()
                 )
+            except Exception:
+                pass
+        if method == "ping":
+            # Logged AFTER publish: this print goes to the QMT output panel,
+            # which costs ~1 adjust tick of GIL wait on the serving thread --
+            # between the handler and the send it inflated ping's round trip
+            # by ~100ms and made the breakdown lie (#104).
+            try:
+                from .logging_setup import get_logger
+                get_logger("rpc").info(
+                    "ping breakdown handle=%.1fms jsonable=%.1fms publish=%.1fms",
+                    (_t1 - _t0) * 1000.0,
+                    (_t_pub0 - _t1) * 1000.0,
+                    (time.perf_counter() - _t_pub0) * 1000.0)
             except Exception:
                 pass
         self._processed_count += 1
