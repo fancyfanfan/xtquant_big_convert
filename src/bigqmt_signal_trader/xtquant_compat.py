@@ -3945,7 +3945,13 @@ class BigQmtXtTrader:
             # back to signal_id, so distinct ids cannot collide into a dedup.
             # An explicit order_remark still wins, and still reaches QMT as the
             # user wrote it.
-            item.setdefault("signal_id", "bqrpc:%s" % uuid.uuid4().hex)
+            #
+            # "rpc-<hex>", character for character what _handle_submit_order
+            # invents, so the remark QMT shows for a no-remark async order is
+            # the same "bqrpc:rpc-<hex>" it was on 0.3.20 -- that string is
+            # visible in 备注 and is what the settlement lookup matches on
+            # (#152), so its shape is not free to drift.
+            item.setdefault("signal_id", "rpc-%s" % uuid.uuid4().hex)
             payload.append(item)
         try:
             results = self.order_stock_batch(account_id, payload,

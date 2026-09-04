@@ -37,9 +37,18 @@
 
   修法是让异步路径**显式退出**幂等契约，`order_stock_batch` 的默认行为一个字不动 —— 它的幂等是防重试重复下单的保险丝，不是可以顺手拆掉的东西。服务端接受 `idempotent`（默认 `True`）；为 `False` 时缺 tag 照单笔路径补 uuid、不去重、也不写 journal（异步的 remark 不是身份，记下来会压掉后面真正的批量单）。客户端 `_submit_async_batch` 传 `False`，并给每项补唯一 `signal_id` —— 对着还不认这个开关的旧服务端，无 remark 的情况也能靠 tag 回落到 signal_id 而不撞去重。
 
-  **实盘验证，未下任何单**：每项 `volume=0`，在 `_handle_submit_order` 的 `volume must be positive` 就退出，到不了 passorder。无 remark + `idempotent=False` 三笔全部答 volume 错误（不再是 `ORDER_TAG_REQUIRED`）；同一 remark + `idempotent=False` 三笔各自独立处理，无一被吞；无 remark 走默认契约仍然 `ORDER_TAG_REQUIRED`。
+  **实盘前后对照，未下任何单**：报告人的场景原样复现 —— 紧凑 while 循环调 `order_stock_async`、不插查询、不带 remark，每项 `order_volume=0`，在 `_handle_submit_order` 的 `volume must be positive` 就退出，到不了 passorder。同一台桥、同一个脚本，只换服务端与客户端版本：
 
-  **未验证**：没真下过单，所以证不到「循环里 N 笔异步单最终在委托列表里出现 N 行」，那要开盘经由本桥真下单。实盘证据证的是两道闸门都不再拦截、每一项都被单独送进提交路径。
+  | 场景 | 修复前 | 修复后 |
+  |---|---|---|
+  | 无 remark，8 笔 | **0/8 到达提交路径，8 笔全被 `ORDER_TAG_REQUIRED` 拦** | **8/8** |
+  | 无 remark 走默认契约 | `ORDER_TAG_REQUIRED` | `ORDER_TAG_REQUIRED`（未变） |
+
+  「连第一单都下不出去」在这里看得很清楚：批次里 index 0 和其余各笔一样被拒，不是「第一单成功、后面被去重」。
+
+  **去重那一半没有实盘证据，只有离线测试**。这个探针证不了它：幂等去重靠 `_submit_journal`，而 journal 只在提交成功之后才写；`volume=0` 让每笔都在写 journal 之前抛错，于是去重根本没机会触发 —— 修复前修复后同样是 8/8。要在实盘证它必须真下单。离线用 DryRun gateway 提交会成功、journal 会写，那里 3 笔同 remark 修复前只下 1 笔、修复后 3 笔全下。
+
+  **未验证**：没真下过单，所以证不到「循环里 N 笔异步单最终在委托列表里出现 N 行」。
 
   **影响范围**：`66c344a`（#181）不在任何 tag 里，这个 bug 从未发布到 PyPI，只影响从源码部署 main 的人。
 

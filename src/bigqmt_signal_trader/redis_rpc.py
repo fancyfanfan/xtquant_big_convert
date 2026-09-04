@@ -1929,8 +1929,12 @@ class BigQmtRpcHandlers:
             if not order_tag and not idempotent:
                 # Same invention as _handle_submit_order, so an async order
                 # with no remark reaches the broker instead of being rejected.
-                order_tag = "bqrpc:%s" % uuid.uuid4().hex
-                item.setdefault("signal_id", order_tag)
+                # Only the signal_id is set: _handle_submit_order derives the
+                # remark from it as "bqrpc:rpc-<hex>", and pre-building the
+                # remark here would double the prefix and change the string QMT
+                # shows in 备注 (which #152's settlement lookup matches on).
+                item.setdefault("signal_id", "rpc-%s" % uuid.uuid4().hex)
+                order_tag = "bqrpc:%s" % item["signal_id"]
             if not order_tag:
                 results.append({
                     "index": index,

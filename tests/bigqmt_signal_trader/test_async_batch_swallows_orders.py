@@ -221,6 +221,37 @@ class AsyncPathSendsTheOptOutTest(unittest.TestCase):
         self.assertIs(seen["idempotent"], False)
         self.assertEqual(len(set(seen["signal_ids"])), 3, seen["signal_ids"])
         self.assertTrue(all(seen["signal_ids"]), seen["signal_ids"])
+        # "rpc-" so the server derives the same "bqrpc:rpc-<hex>" remark the
+        # single path does; see RemarkShapeUnchangedTest.
+        self.assertTrue(all(s.startswith("rpc-") for s in seen["signal_ids"]),
+                        seen["signal_ids"])
+
+
+class RemarkShapeUnchangedTest(unittest.TestCase):
+    """A no-remark async order must carry the same remark it did on 0.3.20.
+
+    The string is visible in QMT's 备注 column and is what the settlement
+    lookup matches on (#152), so the auto-tag's shape is not free to drift --
+    an earlier draft of the #190 fix produced "bqrpc:bqrpc:<hex>".
+    """
+
+    def _remarks(self, gateway):
+        return [str(getattr(r, "remark", "") or "") for r in gateway.submitted]
+
+    def test_batch_auto_tag_matches_the_single_path(self):
+        single = DryRunOrderGateway()
+        _handlers(single)._handle_submit_order(
+            dict(_item("600000.SH"), wait_settlement=False))
+        batched = DryRunOrderGateway()
+        _handlers(batched)._handle_submit_orders_batch({
+            "account_id": "acct", "idempotent": False,
+            "orders": [_item("600000.SH")]})
+
+        one, many = self._remarks(single)[0], self._remarks(batched)[0]
+        self.assertTrue(one.startswith("bqrpc:rpc-"), one)
+        self.assertEqual(len(one), len(many), (one, many))
+        self.assertEqual(one.rsplit("-", 1)[0], many.rsplit("-", 1)[0], (one, many))
+        self.assertNotIn("bqrpc:bqrpc:", many)
 
 
 if __name__ == "__main__":
