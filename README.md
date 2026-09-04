@@ -69,12 +69,13 @@ python -m bigqmt_signal_trader.init_config
 
 ### RPC 接口（远程可调用）
 
-通过 RPC 可调用的大 QMT 能力（**白名单 117 个只读方法 + 2 个下单方法 + 12 个 MiniQMT 风格别名**，覆盖官方文档全部交易/查询函数）：
+通过 RPC 可调用的大 QMT 能力（**白名单 137 个只读方法 + 3 个下单方法（`submit_order` / `submit_orders_batch` / `cancel_order`）+ MiniQMT 风格别名**，覆盖官方文档全部交易/查询函数）：
 
 | 类别 | 方法 |
 |------|------|
 | **系统** | `ping` |
-| **行情快照** | `get_ticks` / `get_full_tick`（五档盘口）|| **合约/品种** | `get_instrument` / `get_instrument_type` / `get_stock_name` / `get_stock_type` / `get_last_close` / `get_last_volume` / `get_open_date` / `get_contract_expire_date` / `get_contract_multiplier` / `get_float_caps` / `get_total_share` / `get_turn_over_rate` / `get_weight_in_index` / `get_svol` / `get_bvol` / `get_risk_free_rate` / `is_stock_type` / `get_cb_info` |
+| **行情快照** | `get_ticks` / `get_full_tick`（五档盘口）|
+| **合约/品种** | `get_instrument` / `get_instrument_type` / `get_stock_name` / `get_stock_type` / `get_last_close` / `get_last_volume` / `get_open_date` / `get_contract_expire_date` / `get_contract_multiplier` / `get_float_caps` / `get_total_share` / `get_turn_over_rate` / `get_weight_in_index` / `get_svol` / `get_bvol` / `get_risk_free_rate` / `is_stock_type` / `get_cb_info` |
 | **K线/历史** | `get_market_data` / `get_market_data_ex` / `get_local_data` / `get_close_price` / `get_index_weight` |
 | **L2 行情** | `get_l2_quote` / `get_l2_order` / `get_l2_transaction` / `subscribe_l2thousand`（需 L2 权限）|
 | **板块** | `get_stock_list_in_sector` / `get_sector_list`* / `get_sector_info` / `create_sector` / `add_sector` / `remove_sector` |
@@ -96,7 +97,7 @@ python -m bigqmt_signal_trader.init_config
 
 > 客户端兼容层 `BigQmtXtData` 对常用方法有显式封装（`xtdata.get_longhubang(...)`、`xtdata.bsm_price(...)` 等），其余通过万能入口 `xtdata.call_method("get_float_caps", stockcode="000001.SZ")` 调用。
 
-> `*` 标记的方法在大 QMT（完整交易端）环境下用 **fallback** 实现（非原生数据）：`get_sector_list` 返回常用板块名清单，`get_holidays` 从交易日历反推，`get_markets` 返回固定市场集合，`get_market_last_trade_date` 从日历派生。详见 [docs/RPC_API_REFERENCE.md](docs/RPC_API_REFERENCE.md) 第 8 节「大 QMT 环境的能力边界」。
+> `*` 标记的方法在大 QMT（完整交易端）环境下用 **fallback** 实现（非原生数据）：`get_sector_list` **不再静默返回兜底清单** —— 拿不到终端真实板块时直接抛错，要那 13 个常用板块名请显式传 `allow_fallback=True`（issue #143：一份和真列表长得一模一样的假清单，调用方分辨不出来，用户自建的板块永远不出现）；`get_holidays` 从交易日历反推，`get_markets` 返回固定市场集合，`get_market_last_trade_date` 从日历派生。详见 [docs/RPC_API_REFERENCE.md](docs/RPC_API_REFERENCE.md) 第 8 节「大 QMT 环境的能力边界」。
 
 ### 客户端兼容层
 
