@@ -5,6 +5,24 @@
 
 ## [未发布]
 
+### 新增
+
+- **`BIGQMT_ACCOUNT_TYPE_MAP`：一个 QMT 进程同时服务股票和期货账号**（PR #135，@fancyfanfan）：网关的 `account_type` 原来是 init 时定死的，单账号部署没问题；一个策略实例服务两个账号时，它必须跟着**请求的 account_id** 走，否则期货账号会被当成 STOCK 查 —— 和 #92 是同一类 bug（信用账号被当 STOCK 查会返回一整行 0 且不报错）。
+
+  ```python
+  BIGQMT_ACCOUNT_TYPE_MAP = {
+      "88888888": "STOCK",
+      "66666666": "FUTURE",
+  }
+  ```
+
+  **不配这一项时行为完全不变** —— 查不到映射就回落到网关自己的 `account_type`。实盘验证过（本终端没配该项）：`account_type` / 现金 / 持仓数 / 持仓统计 / 委托 / 成交逐项一致。
+
+  **已知缺口**：撤单仍是单账号的 —— `OrderRef` 不带 account_id，`cancel()` 用的是网关自己的 `self.account_id`，所以双账号部署里撤期货委托会用股票账号 id 发出去。已单独开跟进。
+
+  **双账号本身未在本仓库验证**：这里只有一个账号，该路径由报告人的生产环境作证。
+
+
 ### 修复
 
 - **`fill_data` 传不到大 QMT，停牌/无数据被静默填成 0 行且关不掉**（issue #167，@zxm9999）：报告人直接指出了断点 —— `_market_data_shapes()` 的 `big_kwargs` 没带 `fill_data`，而它是**第一个被尝试**的 shape，调用成功，参数就被无声丢弃了。
@@ -25,24 +43,6 @@
 
   实盘验证：本终端接受该参数（第一个 shape 直接成功，没有回落），且 `True`/`False` 的返回**确有差异**。新增 11 个测试，修复前 9 个失败。
 
-### 新增
-
-- **`BIGQMT_ACCOUNT_TYPE_MAP`：一个 QMT 进程同时服务股票和期货账号**（PR #135，@fancyfanfan）：网关的 `account_type` 原来是 init 时定死的，单账号部署没问题；一个策略实例服务两个账号时，它必须跟着**请求的 account_id** 走，否则期货账号会被当成 STOCK 查 —— 和 #92 是同一类 bug（信用账号被当 STOCK 查会返回一整行 0 且不报错）。
-
-  ```python
-  BIGQMT_ACCOUNT_TYPE_MAP = {
-      "88888888": "STOCK",
-      "66666666": "FUTURE",
-  }
-  ```
-
-  **不配这一项时行为完全不变** —— 查不到映射就回落到网关自己的 `account_type`。实盘验证过（本终端没配该项）：`account_type` / 现金 / 持仓数 / 持仓统计 / 委托 / 成交逐项一致。
-
-  **已知缺口**：撤单仍是单账号的 —— `OrderRef` 不带 account_id，`cancel()` 用的是网关自己的 `self.account_id`，所以双账号部署里撤期货委托会用股票账号 id 发出去。已单独开跟进。
-
-  **双账号本身未在本仓库验证**：这里只有一个账号，该路径由报告人的生产环境作证。
-
-### 修复
 - **结算不再盲轮询：回调把委托号/状态推给我们了**（issue #164）：下单/撤单结算原来在 adjust 主线程上一轮一轮 `query_orders`（实测一次撤单 3.6s 打了 135 轮）。新增回调喂养的 `OrderWatchTable`（remark→委托号、委托号→状态，有界 FIFO + 24h TTL，C++ 回调线程写、adjust 线程读，普通 dict+锁）：结算先查表，命中即结算、零轮询；查不到回落原有轮询（模拟模式没有回调，轮询保留为兜底）。单测 11 个（含两条快路径零查询、回退路径、表语义/TTL/有界）。**生效需重启策略**（改了顶层 strategy 文件）。
 
 
@@ -52,7 +52,6 @@
 - **`download_holiday_data` / `download_his_st_data` 在大 QMT 上抛 NotImplementedError**（issue #163，@Randall-Chan）：MiniQMT 这两个是从 xtdata 服务下载假日表/ST 历史；大 QMT 终端自己维护这些数据（登录/数据更新时刷新），没有要下载的东西。现在明确回答 no-op + 说明（之前走通用兜底报 NotImplementedError，用户只能注销那两行）。实盘验证：两个调用都返回 `ok: True, downloaded: False` + 说明。客户端补上漏掉的 `download_his_st_data` 方法。
 
 - **redis < 5.0 没有 streams，每个 tick 都在抛 `unknown command 'XADD'`**（issue #163）：事件回放流和持仓事件流都要 XADD，Windows 上常见的老 redis（3.0.x）没有这命令。现在第一次失败就学到并永久跳过 xadd（日志只说一次），pub/sub 回调不受影响（老 redis 上实时回调一直是通的）；升 redis ≥ 5.0 回放自动恢复。瞬时故障不会误触发。回归测试 6 个（修复前全失败）。
-
 
 
 ## [0.3.17] - 2026-09-03
