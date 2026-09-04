@@ -206,6 +206,10 @@ def _order_to_dict(o):
         "account_id", "stock_code", "order_type", "order_status",
         "order_volume", "traded_volume", "price", "order_sysid", "order_id",
         "strategy_name", "order_remark", "order_time",
+        # 柜台成交金额 (#173)。旧部署不发它, getattr 兜底成 None ——
+        # 这里给 None 而不是 0.0 是有意的: "服务端没告诉我" 和
+        # "成交金额确实是 0" 是两回事, 前者该看得出来。
+        "trade_amount",
     ]:
         d[attr] = getattr(o, attr, None)
     # 语义化
@@ -355,7 +359,7 @@ def cmd_orders(args):
         _err("查询委托失败", detail=str(e), code="QUERY_FAIL")
     rows = [_order_to_dict(o) for o in (orders or [])]
     _ok({"orders": rows, "count": len(rows)}, table=args.table,
-        headers=["stock_code", "order_type_name", "order_status_name", "order_volume", "traded_volume", "price", "order_sysid", "cancelable"])
+        headers=["stock_code", "order_type_name", "order_status_name", "order_volume", "traded_volume", "price", "trade_amount", "order_sysid", "cancelable"])
 
 
 def cmd_trades(args):

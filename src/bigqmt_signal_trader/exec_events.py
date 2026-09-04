@@ -372,6 +372,11 @@ def normalize_order_event(order, account_id=""):
         "traded_price": _attr(
             order, ["m_dTradedPrice", "traded_price", "avg_traded_price"]
         ),
+        # 成交金额。查询路径 (query_orders) 和推送路径要给出同一个
+        # 字段，否则走回调的调用方拿不到 cost (issue #173)。
+        "trade_amount": _attr(
+            order, ["m_dTradeAmount", "trade_amount"]
+        ),
         "status": _attr(order, ["m_nOrderStatus", "order_status", "status"]),
         "direction": direction,
         "action": _action_from_direction(direction),

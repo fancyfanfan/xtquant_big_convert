@@ -376,6 +376,7 @@ class OrderSnapshot:
         secu_account="",
         offset_flag=None,
         direction=None,
+        trade_amount=0.0,
     ):
         self.order_sys_id = order_sys_id
         self.user_order_id = user_order_id
@@ -406,6 +407,11 @@ class OrderSnapshot:
         self.secu_account = secu_account
         self.offset_flag = offset_flag
         self.direction = direction
+        # 官方 Order 字段 m_dTradeAmount(成交金额; 期货 = 均价×数量×合约乘数)。
+        # 柜台自己给的成交金额, 不用调用方拿价格乘数量去算 (issue #173)。
+        # 追加在末尾并给默认值, 保持既有位置参数调用不受影响。
+        # 0.0 = 未成交, 或该终端的 ORDER 行不带这个字段。
+        self.trade_amount = trade_amount
 
 
 class TradeSnapshot:
