@@ -29,22 +29,6 @@
 
 ### 修复
 
-- **异步下单被批量端点吞掉，而且吞掉的单返回 success**（#190，实盘报告，#181 的回归）：0.3.20 正常，之后的 main 上「循环里单独调用下单一单也下不出去，插一个别的调用就又能下」，以及「同时下很多单、回调回来一堆、委托列表里只有一单」。两条是同一个根因。
-
-  #181 让 `order_stock_async` 的积压走 `order_stock_batch` 省往返，于是异步下单继承了一份它从没答应过的契约。`_handle_submit_order` 在没有 remark 时自动补 `bqrpc:<uuid>` 且从不去重；`_handle_submit_orders_batch` 两样都相反 —— 缺 tag 直接答 `ORDER_TAG_REQUIRED`（**没写 remark 是异步的常态**，于是一单不下），tag 见过就答 `success: True, idempotent: True` 却根本不到 gateway（**remark 重复对异步完全合法**，于是只下一单）。「插一个别的调用就能下」是批量阈值：队列里只剩一笔时走单笔路径，把循环放慢就把 bug 藏起来了。
-
-  最危险的是被吞掉的单**返回 success**，调用方无从分辨。离线复现的原文是 `reported 2 successes for 1 placed orders`。
-
-  修法是让异步路径**显式退出**幂等契约，`order_stock_batch` 的默认行为一个字不动 —— 它的幂等是防重试重复下单的保险丝，不是可以顺手拆掉的东西。服务端接受 `idempotent`（默认 `True`）；为 `False` 时缺 tag 照单笔路径补 uuid、不去重、也不写 journal（异步的 remark 不是身份，记下来会压掉后面真正的批量单）。客户端 `_submit_async_batch` 传 `False`，并给每项补唯一 `signal_id` —— 对着还不认这个开关的旧服务端，无 remark 的情况也能靠 tag 回落到 signal_id 而不撞去重。
-
-  **实盘验证，未下任何单**：每项 `volume=0`，在 `_handle_submit_order` 的 `volume must be positive` 就退出，到不了 passorder。无 remark + `idempotent=False` 三笔全部答 volume 错误（不再是 `ORDER_TAG_REQUIRED`）；同一 remark + `idempotent=False` 三笔各自独立处理，无一被吞；无 remark 走默认契约仍然 `ORDER_TAG_REQUIRED`。
-
-  **未验证**：没真下过单，所以证不到「循环里 N 笔异步单最终在委托列表里出现 N 行」，那要开盘经由本桥真下单。实盘证据证的是两道闸门都不再拦截、每一项都被单独送进提交路径。
-
-  **影响范围**：`66c344a`（#181）不在任何 tag 里，这个 bug 从未发布到 PyPI，只影响从源码部署 main 的人。
-
-  新增 `tests/bigqmt_signal_trader/test_async_batch_swallows_orders.py`，下单/批量放在文件最前面 —— 这里答错要花真钱，别的用例都没有这个性质。10 例里 5 例在修复前是红的（`git stash` 验证过）。#181 原有的批量测试从来测不到这个：它的 `_order_kwargs` 每笔都带 remark，还把 `order_stock_batch` 整个打了桩，服务端处理器根本没被跑到。
-
 - **策略名一直就在回调里，读错字段了**（#174，@sumo225270 提供 raw_fields）：#174 此前的结论是「大 QMT 的委托/成交行不带策略名，只能靠下单时记、回调时反查」。那是从一个**正确的观察**得出的**错误结论** —— `m_strStrategyName` 确实不存在（实盘列全部属性：ORDER 120 个、DEAL 47 个，两边都没有），但名字在 `m_strSource`（**报单来源**）里，就是 `passorder` 第 8 个参数 `strategyName` 原样回来。
 
   仓库自己早就记着这件事，只是从来没读回来：`docs/MiniQMT_2_BigQMT-Skill/api_mapping.md` 里 `order.strategy_name` 就映射到 `o.m_strSource`；#154 更是在实盘量过 —— 手工下的 13 行 `m_strSource` 为空，本桥下的 3 行带着策略名，而 `m_strStrategyName` 16 行全空。`rpc_default_strategy_name` 这个配置项存在的理由就是它会显示在 QMT 的报单来源列里。
