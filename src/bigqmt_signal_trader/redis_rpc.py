@@ -1925,7 +1925,7 @@ class BigQmtRpcHandlers:
             order_sys_id=order_sys_id,
             user_order_id=str(params.get("user_order_id") or ""),
         )
-        result = self.order_gateway.cancel(order_ref)
+        result = self.order_gateway.cancel(order_ref, account_id=account_id)
 
         # The native cancel return is not trustworthy in EITHER direction.
         # #148: falsey while the broker accepted the cancel (status became 54

@@ -298,7 +298,7 @@ class FalseyCancelGateway(DryRunOrderGateway):
         self.query_error = query_error
         self.lookups = 0
 
-    def cancel(self, order_ref):
+    def cancel(self, order_ref, account_id=None):
         self.cancelled.append(order_ref)
         return CancelResult(
             success=self.native_success,
