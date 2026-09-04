@@ -545,6 +545,58 @@ def _qmt_stime_index(value):
     return str(value or "")
 
 
+def _iso_week_start_label(value):
+    """The Monday of the ISO week a ``1w`` bar label belongs to, as YYYYMMDD.
+
+    Big QMT labels a weekly bar with the **Sunday** of its ISO week. Measured
+    against the live terminal, the weekly close equals the last daily close in
+    Monday..Sunday for 19/19 weeks, two of them holiday-shortened -- so the
+    label is the period end, not the period start (#166).
+
+    Deriving Monday from the label, rather than from where the previous bar
+    sat, is what lets the first bar of a window be filled at all. Returns None
+    for anything unparseable, so the caller fills nothing instead of guessing.
+    """
+    parsed = _parse_qmt_stime(value)
+    if parsed is None:
+        return None
+    day = parsed.date()
+    return (day - _dt.timedelta(days=day.weekday())).strftime("%Y%m%d")
+
+
+def _bar_float(value):
+    """A bar cell as a float, or None for anything that is not a number.
+
+    NaN counts as "not a number" on purpose: an all-NaN preClose column means
+    the same thing as an all-zero one -- the terminal did not answer.
+    """
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number != number:  # NaN
+        return None
+    return number
+
+
+def _frame_bar_labels(frame):
+    """Bar labels in row order, from the normalized index or a stime column.
+
+    Both sources are checked for being date-shaped rather than trusted: a
+    frame that never went through _normalize_market_data_frame still carries a
+    positional index, and 0/1/2 would otherwise be read as bar labels.
+    """
+    for from_index in (True, False):
+        try:
+            values = list(frame.index) if from_index else list(frame["stime"])
+        except Exception:
+            continue
+        labels = [_qmt_stime_index(value) for value in values]
+        if labels and all(len(_digits_only(label)) >= 8 for label in labels):
+            return labels
+    return []
+
+
 def _qmt_datetime_to_epoch_ms(dt_value):
     # QMT bar labels are China local time; MiniQMT's time column is epoch ms.
     china_tz = _dt.timezone(_dt.timedelta(hours=8))
@@ -1088,6 +1140,16 @@ def _full_tick_params(codes, types=None):
 _FIELD_LIST_NOTICE = {"shown": False}
 DIRECT_PATH_FIELDS = ("open", "high", "low", "close", "volume", "amount")
 
+# Periods whose preClose big QMT answers as 0.0, and which we therefore fill
+# from daily bars (#166). Measured read-only on 国金 2.1.19.0 / 0.3.19:
+# 1d/1mon/1q/1hy/1y all carry a real preClose; only 1w is zero, for every code
+# tried and under both fill_data settings. Adding a period here needs the same
+# scan first -- the label semantics differ per period and are verified, not
+# assumed.
+PRE_CLOSE_BACKFILL_PERIODS = ("1w",)
+_PRE_CLOSE_PERIOD_STARTS = {"1w": _iso_week_start_label}
+_PRE_CLOSE_NOTICE = {"shown": False}
+
 
 def _notice_field_list_cost(field_list):
     """Say once that naming fields is what enables the fast path.
@@ -1521,6 +1583,134 @@ class BigQmtXtData:
             data = _normalize_market_data_result(data, field_list=params.get("field_list"))
         return data
 
+    @staticmethod
+    def _pre_close_missing(frame):
+        """True when a frame has a preClose column and no usable value in it.
+
+        "Column present, says nothing" is the #166 symptom. A frame without
+        the column was never asked for it, and one with a single real value
+        came from a terminal that answers -- neither wants filling.
+        """
+        try:
+            column = list(frame["preClose"])
+        except Exception:
+            return False
+        for value in column:
+            number = _bar_float(value)
+            if number is not None and number != 0.0:
+                return False
+        return True
+
+    def _backfill_pre_close(self, data, period, dividend_type,
+                            timeout_seconds=None, use_formula=True):
+        """Fill an all-zero preClose from daily bars (#166).
+
+        Big QMT answers preClose = 0.0 on every ``1w`` bar. The right value,
+        and the one MiniQMT gives, is the daily preClose of the period's FIRST
+        trading day -- which on an ex-dividend day is the adjusted reference
+        price, so it is NOT interchangeable with the previous bar's close even
+        though the two agree in most weeks.
+
+        Costs one extra daily request, and only when a frame actually came
+        back empty-handed: a terminal that answers preClose pays nothing, and
+        neither does a caller who never asked for the column (#104).
+        """
+        period_start = _PRE_CLOSE_PERIOD_STARTS.get(str(period or ""))
+        if period_start is None or not isinstance(data, dict):
+            return data
+
+        targets = {}
+        for code, frame in data.items():
+            if not self._pre_close_missing(frame):
+                continue
+            spans = [(label, period_start(label)) for label in _frame_bar_labels(frame)]
+            spans = [(label, start) for label, start in spans if start]
+            if spans:
+                targets[code] = spans
+        if not targets:
+            return data
+
+        starts = [start for spans in targets.values() for _, start in spans]
+        ends = [label for spans in targets.values() for label, _ in spans]
+        try:
+            daily = self.get_market_data_ex(
+                field_list=["preClose", "stime"], stock_list=sorted(targets),
+                period="1d", start_time=min(starts), end_time=max(ends),
+                count=-1, dividend_type=dividend_type,
+                # A filled row carries no real preClose and would be picked as
+                # a period's "first trading day" if it were returned (#167).
+                fill_data=False, timeout_seconds=timeout_seconds,
+                use_formula=use_formula, backfill_pre_close=False,
+            )
+        except Exception as exc:
+            # Degrade to the terminal's answer. The bars themselves are good;
+            # taking the whole read down over the fill would be the worse bug.
+            log.warning("preClose backfill for period %s skipped: %s", period, exc)
+            return data
+
+        for code, spans in targets.items():
+            rows = self._daily_pre_close_rows(daily.get(code) if isinstance(daily, dict) else None)
+            if not rows:
+                continue
+            frame = data[code]
+            try:
+                existing = list(frame["preClose"])
+            except Exception:
+                continue
+            filled = list(existing)
+            hits = 0
+            for position, (label, start) in enumerate(spans):
+                if position >= len(filled):
+                    break
+                for day, pre_close in rows:      # ascending -> first match wins
+                    if start <= day <= label:
+                        filled[position] = pre_close
+                        hits += 1
+                        break
+            if not hits:
+                continue
+            try:
+                frame["preClose"] = filled
+            except Exception:
+                continue
+            self._notice_pre_close_backfill(period)
+        return data
+
+    @staticmethod
+    def _daily_pre_close_rows(frame):
+        """[(YYYYMMDD, preClose)] ascending, skipping cells with no number."""
+        labels = _frame_bar_labels(frame) if frame is not None else []
+        if not labels:
+            return []
+        try:
+            values = list(frame["preClose"])
+        except Exception:
+            return []
+        rows = []
+        for label, value in zip(labels, values):
+            number = _bar_float(value)
+            if number is not None:
+                rows.append((label, number))
+        rows.sort()
+        return rows
+
+    @staticmethod
+    def _notice_pre_close_backfill(period):
+        """Say once that these preClose values are derived, not the terminal's."""
+        if _PRE_CLOSE_NOTICE["shown"]:
+            return
+        _PRE_CLOSE_NOTICE["shown"] = True
+        try:
+            log.info(
+                "period %s came back with preClose = 0.0 for every bar, so it was "
+                "filled from the daily preClose of each period's first trading day "
+                "(issue #166). That is the same value MiniQMT reports, including on "
+                "an ex-dividend day, but it is computed here rather than answered by "
+                "the terminal -- pass backfill_pre_close=False to get the raw bars.",
+                period)
+        except Exception:
+            pass
+
     def get_market_data_ex(
         self,
         field_list=None,
@@ -1534,6 +1724,7 @@ class BigQmtXtData:
         chunk_size=None,
         timeout_seconds=None,
         use_formula=True,
+        backfill_pre_close=True,
     ):
         """Pull bars over RPC, in batches of ``chunk_size`` codes.
 
@@ -1602,6 +1793,14 @@ class BigQmtXtData:
             for batch, exc in failures:
                 print("[bigqmt_client] get_market_data_ex batch failed (%d codes, first=%s): %s"
                       % (len(batch), batch[0] if batch else "", exc))
+
+        if backfill_pre_close:
+            # Before the cache write, so the cache keeps the corrected bars
+            # rather than a copy of the zeros (#166).
+            data = self._backfill_pre_close(
+                data, period=period, dividend_type=dividend_type,
+                timeout_seconds=timeout_seconds, use_formula=use_formula,
+            )
 
         cache = self._local_cache()
         if cache is not None and isinstance(data, dict):
