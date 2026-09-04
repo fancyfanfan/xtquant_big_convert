@@ -785,20 +785,33 @@ class ExecEventsClientDispatchTest(unittest.TestCase):
         self.assertEqual(err.stock_code, "600654.SH")
 
     def test_async_orders_keep_submission_order(self):
-        """One worker, so responses arrive in the order the calls were made."""
+        """One worker, so responses arrive in the order the calls were made --
+        whether the backlog went out as single submits or one batch (#181)."""
         trader, cb = self._trader()
         original = trader.order_stock_result
+        original_batch = trader.order_stock_batch
 
         def fake(*args, **kwargs):
             return {"order_sys_id": "sys-%s" % args[1]}
 
+        def fake_batch(account, orders, batch_id=""):
+            # Same per-item answer as fake, via the batch seam the worker
+            # picks for a backlog of >=2.
+            return [{
+                "index": index, "success": True,
+                "order_sys_id": "sys-%s" % item.get("stock_code"),
+                "user_order_id": "", "code": 0, "error": "",
+            } for index, item in enumerate(orders)]
+
         trader.order_stock_result = fake
+        trader.order_stock_batch = fake_batch
         try:
             for code in ("A.SH", "B.SH", "C.SH"):
                 trader.order_stock_async("acct", code, 23, 100, 11, 10.0, "s", "r")
             self.assertTrue(trader.wait_async_orders(timeout=5.0))
         finally:
             trader.order_stock_result = original
+            trader.order_stock_batch = original_batch
 
         self.assertEqual([str(r.order_id) for r in cb.async_responses],
                          ["sys-A.SH", "sys-B.SH", "sys-C.SH"])
