@@ -16,11 +16,11 @@
 
 ---
 
-### 讨论组：微信群「量化 qmt 交流群」
+### 讨论组：微信群「qmt 交流群」
 
 用微信扫码进群：
 
-<img src="docs/assets/wechat-group-qr.jpg" alt="量化 qmt 交流群" width="320">
+<img src="docs/assets/wechat-group-qr.jpg" alt="qmt 交流群" width="320">
 
 > **二维码会过期。** 这张是 2026-09-04 生成的，微信群邀请码 7 天有效（本张到 2026-09-11）。
 > 过期后扫码会提示无效 —— 这不是项目的问题，[开个 issue](https://github.com/litaolemo/xtquant_big_convert/issues) 说一声，会换新的。
