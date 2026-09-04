@@ -36,6 +36,27 @@ def _queue_three(trader, slow_seconds=0.25, prefix="drain"):
         return {"order_sys_id": "sys-%d" % len(submitted), "user_order_id": ""}
 
     trader.order_stock_result = slow_order
+
+    def slow_batch(account, orders, batch_id=""):
+        # The worker batches a backlog of >=2 into one order_stock_batch
+        # (issue #181); route each item through the same slow stub so the
+        # drain contract is exercised whichever path the worker took.
+        results = []
+        for index, item in enumerate(orders):
+            single = slow_order(
+                account, item.get("stock_code"), item.get("order_type"),
+                item.get("order_volume"), item.get("price_type"),
+                item.get("price"), item.get("strategy_name"),
+                item.get("order_remark"))
+            results.append({
+                "index": index, "success": True,
+                "order_sys_id": str(single.get("order_sys_id") or ""),
+                "user_order_id": str(single.get("user_order_id") or ""),
+                "code": 0, "error": "",
+            })
+        return results
+
+    trader.order_stock_batch = slow_batch
     for i in range(3):
         trader.order_stock_async(
             "acct", "601398.SH", 23, 100, 5, 7.91, "strat", "%s-%d" % (prefix, i))

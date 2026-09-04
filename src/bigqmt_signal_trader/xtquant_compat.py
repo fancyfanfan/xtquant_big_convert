@@ -2784,6 +2784,11 @@ class BigQmtXtTrader:
         self._async_order_queue = _queue.Queue()
         self._async_order_thread = None
         self._async_order_lock = threading.Lock()
+        # Outcomes (response/error + #51 barrier release) fire on this second
+        # thread, so a slow user callback -- or the bounded wait for a late
+        # order id -- never holds up the next submit (issue #181).
+        self._async_callback_queue = _queue.Queue()
+        self._async_callback_thread = None
         # int -> 合同编号 for ids handed out as OrderId (issue #113).
         self._order_sys_ids = _OrderedDict()
         # on_account_status used to report a hardcoded "STOCK" even for a
@@ -3637,29 +3642,78 @@ class BigQmtXtTrader:
             )
 
     def _async_order_worker(self):
-        """Drain queued async orders, one at a time.
+        """Drain queued async orders; never fires user callbacks itself.
 
         A single worker rather than a pool: the server handles order RPCs on
         the QMT adjust thread serially anyway, so concurrency here buys little,
-        while serializing keeps on_order_stock_async_response arriving in
-        submission order. For real batch throughput use order_stock_batch.
+        while serializing keeps outcome units enqueued in submission order.
+        Callbacks run on the callback worker, so a slow user callback -- or the
+        bounded wait for a late order id -- never holds up the next submit
+        (issue #181). For one order at a time that saves the callback's cost;
+        for a backlog the batch path below saves the round trips too.
         """
         while True:
             job = self._async_order_queue.get()
             if job is None:          # shutdown sentinel
                 self._async_order_queue.task_done()
                 return
-            seq, args, kwargs = job
+            jobs = [job]
+            stopping = False
+            # Take whatever else is already waiting. One RPC for N orders
+            # instead of N: a backlog serializes on the round trip otherwise
+            # (issue #181). Nothing is waited for -- a queue with one job in
+            # it still goes down the single path.
+            while len(jobs) < self.ASYNC_BATCH_MAX:
+                try:
+                    extra = self._async_order_queue.get_nowait()
+                except _queue.Empty:
+                    break
+                if extra is None:
+                    stopping = True      # honour it after this batch, not instead
+                    self._async_order_queue.task_done()
+                    break
+                jobs.append(extra)
             try:
-                self._run_async_order(seq, args, kwargs)
+                self._submit_async_jobs(jobs)
             except Exception:
                 # A worker that dies takes every later async order with it.
-                pass
+                log.exception("async order submit failed for %d job(s)", len(jobs))
             finally:
-                self._async_order_queue.task_done()
+                for _ in jobs:
+                    self._async_order_queue.task_done()
+            if stopping:
+                return
+
+    def _async_callback_worker(self):
+        """Fire outcome units in enqueue (= submission) order, serially.
+
+        This thread, not the submit worker, is where user callbacks run. The
+        #51 barrier release rides along inside the same unit, so the ordering
+        contract -- a委托's async_response before its order/trade events --
+        holds exactly as when everything ran on one thread.
+        """
+        while True:
+            unit = self._async_callback_queue.get()
+            try:
+                if unit is None:      # shutdown sentinel
+                    return
+                self._fire_async_outcome(unit)
+            except Exception:
+                # The dispatcher dying would strand every later callback AND
+                # every armed barrier, so it must not.
+                log.exception("async callback dispatch failed seq=%s",
+                              unit.get("seq") if isinstance(unit, dict) else "?")
+            finally:
+                self._async_callback_queue.task_done()
 
     def _ensure_async_order_worker(self):
         with self._async_order_lock:
+            if self._async_callback_thread is None or not self._async_callback_thread.is_alive():
+                self._async_callback_thread = threading.Thread(
+                    target=self._async_callback_worker,
+                    name="bigqmt-async-callback", daemon=True,
+                )
+                self._async_callback_thread.start()
             if self._async_order_thread is not None and self._async_order_thread.is_alive():
                 return
             thread = threading.Thread(
@@ -3723,6 +3777,13 @@ class BigQmtXtTrader:
     # 委托号异步分配：推送通常比 RPC 应答快，几百毫秒内就能学到；超时则按
     # 原样发 response（order_id 回落 remark），不拖住回调。
     ASYNC_SYSID_WAIT_SECONDS = 2.0
+
+    # Batch what is ALREADY queued when the worker wakes (issue #181). Never
+    # waits to fill a batch: a lone order must not get slower so a busy one
+    # can get faster. 2 is the smallest backlog where one round trip beats
+    # two, and 500 is the server's own limit on submit_orders_batch.
+    ASYNC_BATCH_MIN = 2
+    ASYNC_BATCH_MAX = 500
     # stop()/进程退出时：等队列里已排队的 async 委托发完的上限，以及给
     # 在途 response 触发回调的宽限（issue #156）。
     ASYNC_EXIT_DRAIN_SECONDS = 5.0
@@ -3813,34 +3874,140 @@ class BigQmtXtTrader:
             entry["events"].append(event)
             return True
 
-    def _run_async_order(self, seq, args, kwargs):
-        """Do the actual submit and fire the matching callback. Worker thread."""
+    @staticmethod
+    def _async_job_fields(args, kwargs):
+        """(account, stock_code, ...) from either calling convention.
+
+        order_stock_async forwards *args/**kwargs untouched, so a job may carry
+        either. The batch payload needs them named.
+        """
+        names = ("account", "stock_code", "order_type", "order_volume",
+                 "price_type", "price", "strategy_name", "order_remark")
+        out = {}
+        for index, name in enumerate(names):
+            if name in kwargs:
+                out[name] = kwargs[name]
+            elif len(args) > index:
+                out[name] = args[index]
+        return out
+
+    def _submit_async_jobs(self, jobs):
+        """Submit one job, or a queued backlog, keeping seq order per account."""
+        if len(jobs) < self.ASYNC_BATCH_MIN:
+            seq, args, kwargs = jobs[0]
+            self._submit_async_single(seq, args, kwargs)
+            return
+        # order_stock_batch takes ONE account_id, so a mixed backlog splits by
+        # account -- submitting the rest under the first job's account would
+        # place orders on the wrong account. Within an account seq order is
+        # kept; across accounts the order was never a contract.
+        groups = {}
+        for job in jobs:
+            fields = self._async_job_fields(job[1], job[2])
+            account_id = _account_id(fields.get("account"), self.client.account_id)
+            groups.setdefault(account_id, []).append((job, fields))
+        for account_id, group in groups.items():
+            if len(group) < self.ASYNC_BATCH_MIN:
+                for (seq, args, kwargs), _fields in group:
+                    self._submit_async_single(seq, args, kwargs)
+            else:
+                self._submit_async_batch(account_id, group)
+
+    def _submit_async_batch(self, account_id, group):
+        """Submit a same-account backlog in one RPC, one outcome per job.
+
+        wait_settlement=False on every item, deliberately. It is what the async
+        contract already asks for (#69), and it also sidesteps a latent bug in
+        the batch handler: _handle_submit_order defaults the flag to True and
+        parks each item's settlement in the single _pending_settlement slot, so
+        only the last item of a batch would ever get its order id backfilled.
+
+        A batch that fails as a whole falls back to submitting one at a time.
+        Losing a network round trip must not lose the orders in it (#156).
+        """
+        payload = []
+        for (seq, args, kwargs), fields in group:
+            item = {name: value for name, value in fields.items()
+                    if name != "account" and value is not None}
+            item["wait_settlement"] = False
+            payload.append(item)
+        try:
+            results = self.order_stock_batch(account_id, payload) or []
+        except Exception:
+            log.exception("async batch of %d failed; submitting one at a time",
+                          len(group))
+            results = None
+        if not results:
+            if results is not None:
+                # The server appends one result per item, so nothing back means
+                # the batch never ran -- not that every order failed. Reporting
+                # N failures here would be the dangerous reading: a caller that
+                # retries on failure would place them all a second time.
+                log.warning("async batch of %d returned no results; submitting "
+                            "one at a time", len(group))
+            for (seq, args, kwargs), _fields in group:
+                try:
+                    self._submit_async_single(seq, args, kwargs)
+                except Exception:
+                    log.exception("async order failed after batch fallback seq=%s", seq)
+            return
+        by_index = {}
+        for position, entry in enumerate(results):
+            if isinstance(entry, dict):
+                by_index[int(entry.get("index", position))] = entry
+        for index, ((seq, args, kwargs), fields) in enumerate(group):
+            self._enqueue_batch_outcome(seq, fields, by_index.get(index))
+
+    def _enqueue_batch_outcome(self, seq, fields, entry):
+        """Translate one item of a batch result into that job's outcome unit.
+
+        The per-order wait for a late order id is NOT done for batch items.
+        Serially waiting up to ASYNC_SYSID_WAIT_SECONDS on each of N items
+        would undo the batch: 300 orders would spend 600s waiting instead of
+        0.6s submitting. Items whose id is not back yet answer with the remark,
+        and the real id still arrives on the order_callback push like any other.
+        """
+        remark = str(fields.get("order_remark") or "")
+        stock_code = str(fields.get("stock_code") or "")
+        entry = entry if isinstance(entry, dict) else {}
+        if not entry or not entry.get("success", False):
+            self._enqueue_async_outcome({
+                "kind": "error", "seq": seq, "remark": remark,
+                "stock_code": stock_code,
+                "order_remark": remark,
+                "error_id": int(entry.get("code") or -1),
+                "error_msg": str(entry.get("error")
+                                 or "order missing from batch result"),
+            })
+            return
+        order_sys_id = str(entry.get("order_sys_id") or "")
+        user_order_id = str(entry.get("user_order_id") or remark or "")
+        self._enqueue_async_outcome({
+            "kind": "response", "seq": seq, "remark": remark,
+            "stock_code": stock_code,
+            "strategy_name": str(fields.get("strategy_name") or ""),
+            "order_remark": remark,
+            "order_sys_id": order_sys_id,
+            "user_order_id": user_order_id,
+            "wait_for_sysid": False,
+        })
+
+    def _submit_async_single(self, seq, args, kwargs):
+        """Submit one job and enqueue its outcome. Runs on the order worker."""
         stock_code = str(kwargs.get("stock_code") or (args[1] if len(args) > 1 else ""))
         remark = self._async_remark(args, kwargs)
-        callback = self.callback
+        order_remark = str(kwargs.get("order_remark") or (args[7] if len(args) > 7 else "") or "")
         try:
             # wait_settlement=False：passorder 一返回就应答，不在 worker 里等
             # 服务端结算（那是 #69 要的吞吐）。委托号从推送事件学——屏障暂存的
             # 委托事件里会带上（触发 response 前至多等 2s，学不到就回落 remark）。
             result = self.order_stock_result(*args, wait_settlement=False, **kwargs)
         except Exception as exc:
-            if callback is not None:
-                try:
-                    callback.on_order_error(
-                        CompatObject(
-                            error_id=getattr(exc, "errno", 0),
-                            error_msg=str(exc),
-                            order_sysid="",          # MiniQMT 规范名 (issue #65)
-                            order_sys_id="",
-                            order_id=self._order_object_id(""),   # int (#113)
-                            stock_code=stock_code,
-                            seq=seq,
-                            order_remark=str(kwargs.get("order_remark") or (args[7] if len(args) > 7 else "") or ""),
-                        )
-                    )
-                except Exception:
-                    log.exception("user callback failed: on_order_error seq=%s", seq)
-            self._release_order_barrier(remark, seq)
+            self._enqueue_async_outcome({
+                "kind": "error", "seq": seq, "remark": remark,
+                "stock_code": stock_code, "order_remark": order_remark,
+                "error_id": getattr(exc, "errno", 0), "error_msg": str(exc),
+            })
             return
 
         order_sys_id = ""
@@ -3855,35 +4022,62 @@ class BigQmtXtTrader:
         # pushes an order_error for a 废单; the two carry different information
         # (RPC submit failure vs QMT rejection detail), so both stay available.
         if order_sys_id == "-1" or result == -1:
-            if callback is not None:
-                try:
+            self._enqueue_async_outcome({
+                "kind": "error", "seq": seq, "remark": remark,
+                "stock_code": stock_code, "order_remark": order_remark,
+                "error_id": -1,
+                "error_msg": "order submit failed (order_stock returned -1)",
+            })
+            return
+
+        self._enqueue_async_outcome({
+            "kind": "response", "seq": seq, "remark": remark,
+            "stock_code": stock_code,
+            "strategy_name": str(kwargs.get("strategy_name") or (args[6] if len(args) > 6 else "")),
+            "order_remark": order_remark,
+            "order_sys_id": order_sys_id,
+            "user_order_id": user_order_id,
+            "wait_for_sysid": True,
+        })
+
+    def _enqueue_async_outcome(self, unit):
+        self._async_callback_queue.put(unit)
+
+    def _fire_async_outcome(self, unit):
+        """One job's callback, on the dispatcher thread.
+
+        The barrier release rides in the same unit AFTER the user callback, so
+        the #51 contract -- a委托's async_response before its held order/trade
+        events -- is unchanged from when everything ran on one thread.
+        """
+        callback = self.callback
+        seq = unit["seq"]
+        remark = unit["remark"]
+        try:
+            if unit["kind"] == "error":
+                if callback is not None:
                     callback.on_order_error(
                         CompatObject(
-                            error_id=-1,
-                            error_msg="order submit failed (order_stock returned -1)",
+                            error_id=unit["error_id"],
+                            error_msg=unit["error_msg"],
                             order_sysid="",          # MiniQMT 规范名 (issue #65)
                             order_sys_id="",
                             order_id=self._order_object_id(""),   # int (#113)
-                            stock_code=stock_code,
+                            stock_code=unit["stock_code"],
                             seq=seq,
-                            order_remark=str(kwargs.get("order_remark") or (args[7] if len(args) > 7 else "") or ""),
+                            order_remark=unit["order_remark"],
                         )
                     )
-                except Exception:
-                    log.exception("user callback failed: on_order_error seq=%s", seq)
-            self._release_order_barrier(remark, seq)
-            return
-
-        if callback is not None:
-            try:
+            elif callback is not None:
                 # Native XtOrderResponse shape: one argument carrying
                 # account_id/order_id/seq/error_msg.
                 #
                 # 委托号异步分配（#50）：服务端应答时通常还没有。触发 response 前
                 # 先等屏障从暂存的委托事件里学到委托号（事件推送一般比 RPC 应答
-                # 快，bounded 2s），否则 order_id 只能回落成 remark，调用方按
-                # order_id 管理委托时会拿不到真实委托号（issue #72）。
-                if not order_sys_id and remark:
+                # 快，bounded 2s），否则 order_id 只能回落成 remark（issue #72）。
+                # 这个等如今在回调线程上——它拖住的只是后续回调，不再是后续下单。
+                order_sys_id = unit["order_sys_id"]
+                if unit.get("wait_for_sysid") and not order_sys_id and remark:
                     wait_deadline = time.time() + self.ASYNC_SYSID_WAIT_SECONDS
                     while time.time() < wait_deadline:
                         learned = ""
@@ -3899,21 +4093,21 @@ class BigQmtXtTrader:
                     CompatObject(
                         account_id=self.client.account_id,
                         seq=seq,
-                        order_id=self._order_object_id(order_sys_id or user_order_id),
+                        order_id=self._order_object_id(order_sys_id or unit["user_order_id"]),
                         order_sysid=order_sys_id,    # MiniQMT 规范名 (issue #65)
                         order_sys_id=order_sys_id,
-                        stock_code=stock_code,
-                        strategy_name=str(kwargs.get("strategy_name") or (args[6] if len(args) > 6 else "")),
-                        order_remark=str(kwargs.get("order_remark") or (args[7] if len(args) > 7 else "")),
+                        stock_code=unit["stock_code"],
+                        strategy_name=unit["strategy_name"],
+                        order_remark=unit["order_remark"],
                         error_msg="",
                     ),
                 )
-            except Exception:
-                log.exception(
-                    "user callback failed: on_order_stock_async_response seq=%s", seq
-                )
-        # response 已触发 -> 放行这笔委托暂存的 order/trade (issue #51)。
-        self._release_order_barrier(remark, seq)
+        except Exception:
+            log.exception("user callback failed: async outcome seq=%s kind=%s",
+                          seq, unit.get("kind"))
+        finally:
+            # response/error 已触发 -> 放行这笔委托暂存的 order/trade (issue #51)。
+            self._release_order_barrier(remark, seq)
 
     def order_stock_async(self, *args, **kwargs):
         """Queue an order and return its seq immediately (MiniQMT semantics).
@@ -3942,20 +4136,23 @@ class BigQmtXtTrader:
         return seq
 
     def wait_async_orders(self, timeout=10.0):
-        """Block until every queued async order has been submitted.
+        """Block until every queued async order has been submitted AND its
+        callback fired.
 
         For tests and for shutdown; the API itself is fire-and-forget. Returns
-        False on timeout rather than hanging. Uses task_done bookkeeping, so it
-        waits for the in-flight job too, not merely for the queue to drain.
+        False on timeout rather than hanging. Uses task_done bookkeeping on both
+        queues, so it covers the in-flight submit and the in-flight callback,
+        not merely the drained queues.
         """
-        queue_obj = getattr(self, "_async_order_queue", None)
-        if queue_obj is None:
-            return True
         deadline = time.time() + float(timeout)
-        while queue_obj.unfinished_tasks:
-            if time.time() > deadline:
-                return False
-            time.sleep(0.005)
+        for name in ("_async_order_queue", "_async_callback_queue"):
+            queue_obj = getattr(self, name, None)
+            if queue_obj is None:
+                continue
+            while queue_obj.unfinished_tasks:
+                if time.time() > deadline:
+                    return False
+                time.sleep(0.005)
         return True
 
     def order_stock_batch(self, account, orders, batch_id=""):
