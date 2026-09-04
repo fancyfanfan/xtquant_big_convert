@@ -126,6 +126,70 @@ from bigqmt_signal_trader.xtquant_compat import (
 )
 ```
 
+### 想保留原来的 `xtquant` / `xtdata` 写法怎么办
+
+**本来就支持** —— `src/xtquant/` 是一个 shim 包，提供 `xtdata` / `xttrader` / `xtconstant` / `xttype` 四个子模块。
+
+但它和**真的 xtquant 同名**，所以先看清一件事：
+
+```
+真的 xtquant     .../site-packages/xtquant        （官方包）
+本项目的 shim    .../xtquant_big_convert/src/xtquant
+```
+
+**两者靠 `sys.path` 顺序决胜，排在前面的赢。** shim 自己的文档就写着：
+
+> Put this package before the real xtquant package on PYTHONPATH **only when
+> the caller intentionally wants Big QMT RPC compatibility.**
+
+#### 方案 A：零改动，让 shim 顶替
+
+适合**整套切到桥上**。业务代码一个字不改：
+
+```python
+from xtquant import xtdata
+from xtquant.xtconstant import STOCK_BUY, FIX_PRICE, ORDER_SUCCEEDED
+
+xtdata.get_full_tick(["000001.SZ"])        # 走 RPC 到大 QMT
+```
+
+**代价**：整个进程里再也拿不到真的 xtquant。shim 只实现桥支持的方法，真包里的其他东西就没了。
+
+#### 方案 B：显式导入，两个都留着
+
+适合**渐进迁移**。不让 shim 进 `sys.path`，改成显式：
+
+```python
+from bigqmt_signal_trader.xtquant_compat import xtdata as bq_xtdata
+from bigqmt_signal_trader.xtquant_compat import (
+    XtQuantTrader, StockAccount, XtQuantTraderCallback,
+    STOCK_BUY, FIX_PRICE, ORDER_SUCCEEDED,
+)
+
+from xtquant import xtdata          # 真包，完全不受影响
+```
+
+老代码继续用真 xtquant，新代码走桥，按模块逐步迁。
+
+#### ⚠️ 安装方式决定谁赢
+
+**普通 `pip install xtquant-big-convert` 会把 shim 的 `xtquant/` 装进 site-packages**，和真包同名同目录。两个 pip 包争同一个路径，谁后装谁覆盖，`pip uninstall` 其中一个还可能把另一个的文件带走。
+
+| 你要的 | 装法 |
+|---|---|
+| **方案 A**（shim 顶替），且本机**没有**真 xtquant | 普通 `pip install xtquant-big-convert` |
+| **方案 B**（两个都留着） | **editable 安装**：`pip install -e /path/to/xtquant_big_convert` —— 它不往 site-packages 写 `xtquant/`，只加一条路径，随时能靠调整 `sys.path` 顺序切换 |
+| 按环境切换（本机真包、服务器走桥） | 虚拟环境隔离 + `PYTHONPATH` 控制顺序 |
+
+确认当前谁生效：
+
+```python
+import importlib.util
+print(importlib.util.find_spec("xtquant").origin)
+# ...site-packages/xtquant/__init__.py       -> 真包
+# ...xtquant_big_convert/src/xtquant/...     -> shim
+```
+
 ### 异步回报回调（MiniQMT 风格，实盘验证）
 
 客户端注册 `XtQuantTraderCallback` 子类，`connect()`/`subscribe()` 后实时接收委托/成交/错误回报（通过 Redis pubsub 推送）：
