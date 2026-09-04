@@ -86,6 +86,7 @@ class RenderedConfigTest(unittest.TestCase):
         self.assertEqual(loaded["BIGQMT_ACCOUNT_ID"], "8886800503")
         self.assertEqual(loaded["BIGQMT_REDIS_CONFIG"]["transport"], "redis")
         self.assertEqual(loaded["BIGQMT_REDIS_CONFIG"]["host"], "10.0.0.5")
+        self.assertIs(loaded["BIGQMT_LOCAL_CACHE_CONFIG"]["fallback_rpc"], True)
 
     def test_server_and_client_agree_on_the_connection(self):
         """Two files, one deployment: a mismatch here is a silent no-connect."""

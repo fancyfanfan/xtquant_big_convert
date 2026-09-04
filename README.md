@@ -948,7 +948,7 @@ src/BIGQMT_ZMQ_DRYRUN.py           （★ 同机 ZMQ 专用入口，强制 ZMQ �
 
 > 同机 ZMQ 在 QMT“模型研究”中新建 Python 模型并加载 `BIGQMT_ZMQ_DRYRUN.py`；其它 transport 继续使用 `BIGQMT_REDIS_DRYRUN.py`。ZMQ 入口只复用原入口的加载逻辑，不会创建 Redis client。
 >
-> **纯 ZMQ 模式的能力边界**：入口会自动关闭所有依赖 Redis 的功能——`download_jobs`（下载任务队列）、`exec_events`（`on_stock_order`/`on_stock_trade`/`on_order_error` 推送）、`full_tick_cache`（全市场快照缓存）。即纯 ZMQ 下**没有执行回报推送**，委托状态需主动 `query_stock_orders` 轮询。行情查询、下单/撤单、持仓查询等 RPC 全部正常。
+> **纯 ZMQ 模式的能力边界**：入口会关闭确实依赖 Redis 的 `download_jobs`（下载任务队列）和 `full_tick_cache`（全市场快照缓存）。`on_stock_order` / `on_stock_trade` / `on_order_error` 执行回报通过 ZMQ PUB 推送，MiniQMT 风格回调可以正常使用，但没有 Redis Stream 的短时回放能力。行情查询、下单/撤单、持仓查询等 RPC 全部正常。
 
 ### 第 2 步：创建 QMT 端私有配置
 

@@ -205,7 +205,7 @@ def render_client_config(answers):
         "BIGQMT_LOCAL_CACHE_CONFIG = {",
         '    "enabled": True,',
         '    "dir": None,',
-        '    "fallback_rpc": False,',
+        '    "fallback_rpc": True,  # MiniQMT-compatible adjusted reads; False = offline only',
         '    "format": "auto",',
         "}",
         "",

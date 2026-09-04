@@ -52,7 +52,13 @@ del _const_name
 
 
 # Default OHLCV fields pulled + cached by get_local_data fallback_rpc.
-DEFAULT_DOWNLOAD_FIELDS = ["open", "high", "low", "close", "volume", "amount"]
+# MiniQMT documents an empty field list as "all fields", including ``time`` and
+# ``openInterest`` for K-lines.  Cache fills deliberately use a bounded subset
+# instead, but omitting those two standard fields leaves the resulting frame
+# observably incompatible with MiniQMT consumers.
+DEFAULT_DOWNLOAD_FIELDS = [
+    "time", "open", "high", "low", "close", "volume", "amount", "openInterest",
+]
 # Codes per get_market_data_ex request. One request carries a single RPC timeout,
 # so a wide stock_list either fits or loses everything (issue #47).
 DEFAULT_MARKET_DATA_CHUNK = 100
@@ -760,7 +766,10 @@ class BigQmtRpcClient:
             ),
         }
         # Client-side local market-data cache. get_market_data_ex is cache-through;
-        # fallback_rpc=True lets get_local_data fetch+cache a cache miss.
+        # get_local_data falls back to Big QMT by default so a MiniQMT-style
+        # download of raw history can be followed by a read in another
+        # adjustment mode. Set fallback_rpc=False only for an explicitly
+        # offline, cache-only client.
         local_cache_config = dict(client_config.get("local_cache_config") or {})
         self.local_cache_config = {
             "enabled": _bool_value(
@@ -775,7 +784,7 @@ class BigQmtRpcClient:
             ),
             "fallback_rpc": _bool_value(
                 local_cache_config.get("fallback_rpc", merged_redis_config.get("local_cache_fallback_rpc")),
-                _env_bool("BIGQMT_LOCAL_CACHE_FALLBACK_RPC", False),
+                _env_bool("BIGQMT_LOCAL_CACHE_FALLBACK_RPC", True),
             ),
             "format": str(
                 local_cache_config.get("format")

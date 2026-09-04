@@ -32,10 +32,12 @@ def _time_axis(df):
     otherwise a MiniQMT-shaped write silently disables date filtering, so
     get_local_data returns every cached day regardless of the window
     (issue #54 follow-up).
+
+    A MiniQMT-compatible frame can also have *both* a date-shaped index and an
+    epoch-ms ``time`` column.  Prefer the index in that case: parquet must keep
+    it, and date-window comparisons must not compare ``20260818`` with
+    ``1786982400000`` as strings.
     """
-    name = _time_col(df)
-    if name:
-        return name, False
     index = getattr(df, "index", None)
     try:
         if index is not None and len(index):
@@ -44,6 +46,9 @@ def _time_axis(df):
                 return "__index__", True
     except Exception:
         pass
+    name = _time_col(df)
+    if name:
+        return name, False
     return None, False
 
 

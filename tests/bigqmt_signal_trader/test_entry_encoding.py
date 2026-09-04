@@ -58,6 +58,7 @@ class EntryEncodingTest(unittest.TestCase):
         with open(legacy_path, "r", encoding="gbk") as source_file:
             legacy_source = source_file.read()
         self.assertIn('BIGQMT_REDIS_CONFIG["download_jobs_enabled"] = False', legacy_source)
+        self.assertNotIn('BIGQMT_REDIS_CONFIG["exec_events_enabled"] = False', legacy_source)
 
     def test_legacy_entry_supports_qmt_without_standard_importlib(self):
         """裁剪过的 QMT Python 缺少 importlib 时仍可加载 Bridge。"""
