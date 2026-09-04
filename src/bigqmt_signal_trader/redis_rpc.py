@@ -1865,9 +1865,24 @@ class BigQmtRpcHandlers:
             or (orders[0] or {}).get("strategy_name")
             or self.default_strategy_name
         )
+        # order_stock_async routes a queued backlog through here (#181), but it
+        # never promised order_stock_batch's idempotency contract, and
+        # inheriting it swallowed orders while answering success (#190):
+        # no remark is normal for async (the single path invents
+        # "bqrpc:<uuid>"), and repeating one is legal there. Under this batch
+        # endpoint the first meant ORDER_TAG_REQUIRED and placed nothing, the
+        # second meant "already submitted" and placed one of N.
+        #
+        # Default True so deliberate order_stock_batch callers -- who supply
+        # tags precisely to be protected against a retry double-ordering --
+        # keep exactly today's behaviour. Only a caller that opts out gets the
+        # single path's semantics.
+        idempotent = params.get("idempotent")
+        idempotent = True if idempotent is None else bool(idempotent)
         existing_by_tag = {}
         lookup_ok = True
-        requires_lookup = any(bool((item or {}).get("require_idempotency_check")) for item in orders)
+        requires_lookup = idempotent and any(
+            bool((item or {}).get("require_idempotency_check")) for item in orders)
         if requires_lookup:
             try:
                 identity_query = getattr(self.order_gateway, "query_submission_identities_strict", None)
@@ -1911,6 +1926,15 @@ class BigQmtRpcHandlers:
             # keyed to one reply, which is the "把单槽改成队列" half of #181.
             item["wait_settlement"] = False
             order_tag = str(item.get("order_remark") or item.get("remark") or item.get("signal_id") or "")
+            if not order_tag and not idempotent:
+                # Same invention as _handle_submit_order, so an async order
+                # with no remark reaches the broker instead of being rejected.
+                # Only the signal_id is set: _handle_submit_order derives the
+                # remark from it as "bqrpc:rpc-<hex>", and pre-building the
+                # remark here would double the prefix and change the string QMT
+                # shows in 备注 (which #152's settlement lookup matches on).
+                item.setdefault("signal_id", "rpc-%s" % uuid.uuid4().hex)
+                order_tag = "bqrpc:%s" % item["signal_id"]
             if not order_tag:
                 results.append({
                     "index": index,
@@ -1923,9 +1947,9 @@ class BigQmtRpcHandlers:
                     "user_order_id": "",
                 })
                 continue
-            known = existing_by_tag.get(order_tag)
+            known = existing_by_tag.get(order_tag) if idempotent else None
             journal_key = (account_id, strategy_name, order_tag)
-            journal = self._submit_journal.get(journal_key)
+            journal = self._submit_journal.get(journal_key) if idempotent else None
             if known is not None or journal is not None:
                 results.append({
                     "index": index,
@@ -1964,7 +1988,11 @@ class BigQmtRpcHandlers:
                     "order_sys_id": str(getattr(result, "order_sys_id", None) or ""),
                     "user_order_id": str(getattr(result, "user_order_id", None) or ""),
                 }
-                if order_tag:
+                # Not journalled when the caller opted out: those tags are not
+                # identities (async may repeat a remark for genuinely different
+                # orders), so recording them would let one suppress a later
+                # deliberate order_stock_batch item that reuses the string.
+                if order_tag and idempotent:
                     self._submit_journal[journal_key] = dict(response)
                 results.append(response)
             except Exception as exc:

@@ -41,7 +41,7 @@ def _order_kwargs(code, remark):
                 order_remark=remark)
 
 
-def _ok_batch(account, orders, batch_id=""):
+def _ok_batch(account, orders, batch_id="", idempotent=True):
     return [{
         "index": index, "success": True,
         "order_sys_id": "sys-%s" % item.get("order_remark"),
@@ -60,7 +60,7 @@ class BatchSelectionTest(unittest.TestCase):
             lambda *a, **k: calls["single"].append(a) or
             {"order_sys_id": "sys-single", "user_order_id": ""})
         trader.order_stock_batch = (
-            lambda account, orders, batch_id="":
+            lambda account, orders, batch_id="", idempotent=True:
             calls["batch"].append((account, orders)) or _ok_batch(account, orders))
         return trader, recorder, calls
 
@@ -93,7 +93,7 @@ class BatchSelectionTest(unittest.TestCase):
     def test_a_failing_batch_falls_back_to_single_submits(self):
         trader, rec, calls = self._trader()
         calls_log = []
-        def raising_batch(account, orders, batch_id=""):
+        def raising_batch(account, orders, batch_id="", idempotent=True):
             calls_log.append(len(orders))
             raise RuntimeError("network gone")
         trader.order_stock_batch = raising_batch
@@ -109,7 +109,7 @@ class BatchSelectionTest(unittest.TestCase):
 
     def test_an_empty_batch_result_falls_back_to_single_submits(self):
         trader, rec, calls = self._trader()
-        trader.order_stock_batch = lambda account, orders, batch_id="": []
+        trader.order_stock_batch = lambda account, orders, batch_id="", idempotent=True: []
         seqs = [trader.order_stock_async("acct", "60%04d.SH" % i, 23, 100, 11,
                                          10.0, "s", "r-%d" % i)
                 for i in range(2)]
@@ -125,7 +125,7 @@ class BatchSelectionTest(unittest.TestCase):
     def test_a_failed_item_errors_alone(self):
         trader, rec, _calls = self._trader()
 
-        def mixed_batch(account, orders, batch_id=""):
+        def mixed_batch(account, orders, batch_id="", idempotent=True):
             results = _ok_batch(account, orders)
             results[1] = {"index": 1, "success": False, "code": -1,
                           "error": "ORDER_REJECTED", "user_order_id": "r-1"}
@@ -148,7 +148,7 @@ class BatchSelectionTest(unittest.TestCase):
         batches = []
         singles = []
 
-        def tracking_batch(account, orders, batch_id=""):
+        def tracking_batch(account, orders, batch_id="", idempotent=True):
             batches.append((account, list(orders)))
             return _ok_batch(account, orders)
 
