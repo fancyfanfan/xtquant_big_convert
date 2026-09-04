@@ -540,10 +540,11 @@ class BigQmtOrderGateway:
             message="passorder submitted",
         )
 
-    def cancel(self, order_ref):
+    def cancel(self, order_ref, account_id=None):
         cancel_func = self._require_cancel()
-        account_type = self._resolve_account_type(self.account_id)
-        ok = cancel_func(order_ref.order_sys_id, self.account_id, account_type, self.context_info)
+        aid = account_id or self.account_id
+        account_type = self._resolve_account_type(aid)
+        ok = cancel_func(order_ref.order_sys_id, aid, account_type, self.context_info)
         return CancelResult(success=bool(ok), message="" if ok else "cancel returned false")
 
     def query_orders(self, account_id, strategy_name):

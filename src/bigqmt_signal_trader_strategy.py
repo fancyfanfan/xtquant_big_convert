@@ -766,7 +766,7 @@ def _build_rpc_service(context_info, app, config):
         "[bigqmt_rpc] transport=%s mode process_in_listener=%s listener_methods=%s allow_order_methods=%s background_threads=%s"
         % (transport_name, process_in_listener, listener_methods, allow_order_methods, background_threads)
     )
-    return RedisPubSubRpcService(
+    service = RedisPubSubRpcService(
         redis_client=redis_client,
         response_redis_client=response_redis_client,
         handlers=handlers,
@@ -782,6 +782,23 @@ def _build_rpc_service(context_info, app, config):
         debug_log_limit=int(rpc_config.get("debug_log_limit", 5)),
         transport=transport,
     )
+    # Multi-account: when BIGQMT_ACCOUNT_TYPE_MAP has multiple entries,
+    # build one RPC service per account sharing the same handlers.
+    try:
+        from bigqmt_signal_trader.multi_account import build_multi_account_rpc_service
+        multi_service = build_multi_account_rpc_service(
+            context_info, app, config,
+            # The single-service builder: reuse everything we just built
+            # as the primary, and let build_multi_account_rpc_service
+            # create secondary services if the map has more entries.
+            lambda ctx, app, cfg: service if ctx is context_info else None,
+        )
+        if multi_service is not service:
+            # Multi-account mode: wrapped in MultiAccountRpcServiceManager
+            return multi_service
+    except Exception as _ma_err:
+        print("[bigqmt_rpc] multi_account check failed (single-account fallback): %s" % _ma_err)
+    return service
 
 
 def _start_rpc_service(context_info, app, config):
