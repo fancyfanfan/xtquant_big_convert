@@ -569,6 +569,7 @@ class XtquantCompatTest(unittest.TestCase):
         self.assertEqual(client.redis_config["username"], "cfg-user")
         self.assertEqual(client.redis_config["password"], "cfg-pass")
         self.assertEqual(client.timeout_seconds, 9)
+        self.assertIs(client.local_cache_config["fallback_rpc"], True)
 
     def test_explicit_client_params_override_private_config(self):
         module_name, old_env = self._with_fake_config()

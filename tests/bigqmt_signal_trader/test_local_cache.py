@@ -291,7 +291,14 @@ class FakeClient:
             import pandas as pd
 
             codes = (params or {}).get("stock_list") or []
-            return {c: pd.DataFrame({"stime": ["20260626", "20260629"], "close": [8.76, 8.73]}) for c in codes}
+            return {
+                c: pd.DataFrame({
+                    "stime": ["20260626", "20260629"],
+                    "close": [8.76, 8.73],
+                    "openInterest": [0.0, 0.0],
+                })
+                for c in codes
+            }
         if method == "download_history_data2":
             # Server-side raw download (raw bars + dividend factors).
             return True
@@ -355,6 +362,31 @@ class LocalCacheClientTest(unittest.TestCase):
         n = len(xt.client.calls)
         xt.get_local_data(stock_list=["600000.SH"], period="1d")
         self.assertEqual(len(xt.client.calls), n)
+
+    def test_download_then_different_adjustment_read_falls_back(self):
+        """A MiniQMT-style raw download can be read as front_ratio data."""
+        xt = self._xt(fallback_rpc=True)
+
+        xt.download_history_data("600000.SH", "1d", "20260601", "20260630")
+        calls_after_download = len(xt.client.calls)
+        data = xt.get_local_data(
+            [], ["600000.SH"], "1d", "20260601", "20260630", -1,
+            "front_ratio", False,
+        )
+
+        self.assertIn("600000.SH", data)
+        self.assertGreater(len(xt.client.calls), calls_after_download)
+        frame = data["600000.SH"]
+        self.assertIn("time", frame.columns)
+        self.assertIn("openInterest", frame.columns)
+        self.assertGreater(int(frame.iloc[0]["time"]), 0)
+        method, params = xt.client.call_params[-1]
+        self.assertEqual(method, "get_market_data_ex")
+        self.assertEqual(params["dividend_type"], "front_ratio")
+        self.assertEqual(
+            params["field_list"],
+            ["time", "open", "high", "low", "close", "volume", "amount", "openInterest"],
+        )
 
 
 class CompatReadMatrixTest(unittest.TestCase):

@@ -23,6 +23,10 @@
 
   **未验证**：本机当日 14 笔委托 / 17 笔成交全是手工单，只读探针测到 `m_strSource` 在这些行上**全为空** —— 这只证到了负面对照（手工单不会被安上策略名），证不到「本桥下的单在这台终端上能端到端带回策略名」。那要开盘时经由本桥真下一单，本任务不下单。正面证据来自 #154 的实盘测量和报告人的 dump。
 
+- **MiniQMT 历史数据语义与纯 ZMQ 交易回调不再意外缩水**：客户端本地缓存填充时保留 MiniQMT K 线字段中的 `time` / `openInterest`，并默认允许“下载原始数据后按另一复权方式读取”时回源 Big QMT；缓存同时存在日期索引和毫秒 `time` 列时，优先用日期索引做窗口过滤。这些都是 MiniQMT 可观察行为，不绑定某个上层框架。
+
+  纯 ZMQ 入口不再强制关闭 `exec_events`：现有 ZMQ PUB 通道可承载 `on_stock_order` / `on_stock_trade` / `on_order_error` MiniQMT 风格回调。仍无 Redis Stream 的短时回放，且 `download_jobs` / `full_tick_cache` 依然在纯 ZMQ 入口中关闭。
+
 - **`qmt.py trades` 现在带上 `strategy_name`**（#174 的后续，客户端工具）：#174 给的绕行办法是「回调拿不到策略名时用查询兜一下」—— 查询路径确实是补全过的（`_attribute_to_strategies`），可照着这个办法用本仓库自己的 CLI 去查成交的人，看到的是查询路径**也**没有策略名。
 
   字段是在最后一步被丢掉的，不是没送到：只读核对了实盘应答，服务端发的成交行**带** `strategy_name` 这个键（当日 17 笔，17 项俱全），是 CLI 的 `_trade_to_dict` 没把它列进去 —— 委托那侧的 `_order_to_dict` 一直列着。

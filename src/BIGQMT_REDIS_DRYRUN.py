@@ -297,7 +297,9 @@ try:
         if str(forced_transport).lower() == "zmq":
             BIGQMT_REDIS_CONFIG["rpc_background_threads"] = True
             BIGQMT_REDIS_CONFIG["download_jobs_enabled"] = False
-            BIGQMT_REDIS_CONFIG["exec_events_enabled"] = False
+            # Execution events have a native ZMQ PUB path.  Preserve the
+            # configured/default switch so MiniQMT-compatible order and trade
+            # callbacks keep working without Redis.
             BIGQMT_REDIS_CONFIG["full_tick_cache_enabled"] = False
     print("[bigqmt_shell] local rpc config loaded transport=%s keys=%s" % (
         (BIGQMT_REDIS_CONFIG or {}).get("transport", "redis"),

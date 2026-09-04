@@ -49,12 +49,14 @@ BIGQMT_FULL_TICK_CACHE_CONFIG = {
 #   then reads them locally with NO RPC to Big QMT (for offline / repeated local
 #   analysis). download_history_data* submits a server-side Big QMT download job.
 #   - dir: cache folder (default ~/.bigqmt_cache), one pickle per (period, code).
-#   - fallback_rpc: if True, get_local_data auto-fetches+caches a cache miss;
-#     if False (default), a cache-missed code is simply omitted (download first).
+#   - fallback_rpc: if True (default), get_local_data auto-fetches+caches a
+#     cache miss.  This preserves MiniQMT's visible behaviour when a caller
+#     downloads raw data and then reads a different adjustment mode.
+#     Set False only when this client must be strictly offline/cache-only.
 BIGQMT_LOCAL_CACHE_CONFIG = {
     "enabled": True,
     "dir": None,            # None -> ~/.bigqmt_cache
-    "fallback_rpc": False,
+    "fallback_rpc": True,
     # Storage format: "auto" (parquet if pyarrow installed, else pickle),
     # "parquet" (columnar/compressed/cross-language — recommended), or "pkl".
     # One file per (period, dividend_type, code); switching format auto-migrates.
